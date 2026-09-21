@@ -15,7 +15,7 @@ const SUB_KEY = 'watcher.subscriber'; // the token survives reloads, so one scan
 const SESSION_KEY = 'watcher.session'; // so does the session: a reload resumes it
 // The page may be served from another origin than the worker (Convex static hosting);
 // config.js says where the worker is. Empty means same origin, as under `make dev`.
-const WORKER = window.WORKER_URL || '';
+const WORKER = (window.WORKER_URL || '').replace(/\/+$/, ''); // paths start with '/'; '//session' is a 404
 const BOT = window.TELEGRAM_BOT_USERNAME || '';
 const HEARTBEAT_MS = 20000;
 // All state lives in Convex: the page reads it through live queries and changes it through
