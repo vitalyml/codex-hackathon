@@ -7,14 +7,15 @@
   bot delivers the alert.
 - **Live app:** not deployed
 - **Repo:** https://github.com/aroldohernandezarmas/codex-hackathon
-- **Frontend:** Other
+- **Frontend:** Convex static hosting
 - **Convex deployment:** not deployed
-- **Components:** none
-- **Convex features:** none yet
+- **Components:** @convex-dev/static-hosting
+- **Convex features:** schema, tables, indexes, queries, mutations, actions, crons, file
+  storage, realtime queries
 - **Auth:** none
-- **AI models:** grok-4.20-0309-non-reasoning
+- **AI models:** gpt-4o (OpenAI, since 2026-09-21; grok-4.20-0309-non-reasoning before)
 - **Started:** 2026-09-12T08:29:25Z
-- **Last updated:** 2026-09-21T11:35:43Z
+- **Last updated:** 2026-09-21T18:22:30Z
 
 ## Log
 
@@ -71,7 +72,53 @@ Session cost now comes straight from the API's `cost_in_usd_ticks` instead of a 
 estimate, with a per-interval cost table added to the README
 (`src/server/cv/perception.py`, `README.md`).
 
-### 2026-09-21 - working tree
-Convex project set up: `convex` added as a dependency, a `convex/` directory created,
-and `.gitignore` updated for `.env.local` by the Convex CLI. No schema, functions, or
-components written yet (`package.json`, `.gitignore`).
+### 2026-09-21 - 802b706
+Convex project set up and the page moved to Convex static hosting: `scripts/build_web.sh`
+assembles `dist/` from `static/` with a generated `config.js`, no bundler; the Python
+service stays as a separate compute worker. Vision moved from xAI Grok to OpenAI `gpt-4o`
+behind the same request shape, with session cost estimated from token counts. Components:
+@convex-dev/static-hosting (`convex/convex.config.ts`, `src/server/cv/perception.py`).
+
+### 2026-09-21 - 9bb2225
+All durable state designed and built in Convex; decisions recorded in an ADR. Tables for
+sessions, watches, events, subscribers and presence, with indexes by status, subscriber,
+session and chat. Starting a session and adding a rule are actions that ask the worker to
+normalize the rule, then insert through a mutation that checks the session and rule
+limits in the same transaction. A 20 s heartbeat plus a cron sweep stop sessions whose
+tab is gone; other crons keep the worker awake and clean up old sessions. Event photos go
+to file storage. Convex features: schema, indexes, queries, mutations, actions, crons,
+file storage (`convex/schema.ts`, `convex/sessions.ts`, `convex/watches.ts`,
+`convex/worker.ts`, `convex/crons.ts`,
+`docs/decisions/ADR-20260921-convex-as-state-backend.md`).
+
+### 2026-09-21 - 7af0f06
+The worker keeps nothing durable any more. Before each model call it reads the watches
+from `sessions:live`, rebuilds the tracker from the stored state, and writes the whole
+answer back with one mutation, `worker:record`; a failed save is retried with the same
+answer and a call id makes the repeat harmless. Rules that fire on one frame share one
+photo. The client is a small `httpx` wrapper over the Convex HTTP API
+(`src/server/convex_client.py`, `src/server/engine.py`, `convex/worker.ts`).
+
+### 2026-09-21 - e3b1118
+The page runs on Convex live queries instead of SSE and polling: session state, events
+and the Telegram link flag arrive through subscriptions from the vendored Convex browser
+bundle. A session survives a reload and can be shared by link (`?session=<id>`); free use
+is limited to 10 minutes per browser. Convex features: realtime queries
+(`static/app.js`, `static/vendor/convex-browser.bundle.js`, `convex/events.ts`,
+`convex/subscribers.ts`).
+
+### 2026-09-21 - 8f35683
+Cost and latency measured and fixed for production: frames go with image `detail: low`
+(189 prompt tokens instead of 529, same answers on ten test calls), and the worker moves
+to Render region `virginia` next to Convex US East, which brings a model call to about
+1.3 s and an event with its photo to about 1.6 s (`src/server/cv/perception.py`,
+`render.yaml`, the ADR).
+
+### 2026-09-21 - 5cf0bd7
+The Telegram bot moved to Convex state, the last part of the migration. Every bot screen
+is one secret-gated query, `worker:telegram`; linking a chat, pausing alerts,
+disconnecting and adding or editing a rule are mutations, and an edit gives the watch a
+new id so a model answer in flight for the old wording is ignored. The old in-memory
+session and subscriber stores are deleted. A smoke script drives a session from start to
+stop through the page's and the bot's functions against the dev deployment
+(`convex/worker.ts`, `src/server/telegram/notifier.py`, `scripts/convex_smoke.py`).
