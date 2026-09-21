@@ -1,0 +1,69 @@
+name: Deploy to Convex
+
+on:
+  push:
+    branches: [master]
+    # None of these exist on master until the `convex` branch merges, so the
+    # job stays dormant until there is actually something to deploy.
+    paths:
+      - convex/**
+      - static/**
+      - scripts/build_web.sh
+      - package.json
+      - package-lock.json
+      - .github/workflows/deploy.yml
+  workflow_dispatch:
+
+# One deploy at a time, and never cancel one halfway: it pushes functions and
+# then uploads the page, and a killed run leaves the two out of sync.
+concurrency:
+  group: convex-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # ADR-20260921 requires an explicit go-ahead for the production deployment
+    # and the static upload. A protected environment is where that gate lives.
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: npm ci
+
+      # scripts/build_web.sh writes every one of these into dist/static/config.js
+      # unconditionally. Unset means an empty string, i.e. a page that deploys
+      # green and then cannot reach the worker. Fail here instead.
+      - name: Check page config is present
+        env:
+          WORKER_URL: ${{ vars.WORKER_URL }}
+          TELEGRAM_BOT_USERNAME: ${{ vars.TELEGRAM_BOT_USERNAME }}
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+        run: |
+          missing=""
+          for v in WORKER_URL TELEGRAM_BOT_USERNAME CONVEX_DEPLOY_KEY; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::missing required config:$missing"
+            exit 1
+          fi
+
+      # One shot: runs `npm run build`, then `npx convex deploy`, then uploads
+      # dist/ to static hosting. It injects the deployment URL as
+      # VITE_CONVEX_URL for the build, which is what build_web.sh reads.
+      # A bare `npx convex deploy` would ship functions and leave the page stale.
+      - name: Deploy functions and page
+        run: npx @convex-dev/static-hosting deploy
+        env:
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+          WORKER_URL: ${{ vars.WORKER_URL }}
+          TELEGRAM_BOT_USERNAME: ${{ vars.TELEGRAM_BOT_USERNAME }}
