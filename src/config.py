@@ -30,3 +30,7 @@ MAX_SUBSCRIBERS = int(os.getenv("MAX_SUBSCRIBERS", "20"))
 SUBSCRIBER_TTL = float(os.getenv("SUBSCRIBER_TTL", "86400"))
 PORT = int(os.getenv("PORT", "8000"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+CONVEX_URL = os.getenv("CONVEX_URL", "")  # https://<deployment>.convex.cloud
+# Where the page lives when it is not served by this app (Convex static hosting);
+# that origin is allowed to call the API. Empty: same-origin only.
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "")

@@ -23,3 +23,7 @@ services:
         value: "30"
       - key: TELEGRAM_BOT_TOKEN
         sync: false
+      - key: CONVEX_URL
+        sync: false
+      - key: FRONTEND_ORIGIN
+        sync: false

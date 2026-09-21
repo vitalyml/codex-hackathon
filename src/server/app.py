@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, File, HTTPException, Response, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
@@ -82,6 +83,13 @@ def create_app(
             await asyncio.gather(*tasks, return_exceptions=True)
 
     app = FastAPI(title="camera events", lifespan=lifespan)
+    if config.FRONTEND_ORIGIN:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=[config.FRONTEND_ORIGIN],
+            allow_methods=["GET", "POST", "DELETE"],
+            allow_headers=["content-type"],
+        )
 
     def _linked(token: Optional[str]) -> bool:
         return bool(token and token in subs and subs.get(token).chat_id is not None)
@@ -108,6 +116,17 @@ def create_app(
     @app.get("/")
     async def index():
         return FileResponse(STATIC / "index.html")
+
+    @app.get("/static/config.js")  # before the /static mount, which has no such file
+    async def page_config():
+        """What scripts/build_web.sh bakes into dist/ for Convex hosting, served live here."""
+        values = {
+            "CONVEX_URL": config.CONVEX_URL,
+            "WORKER_URL": "",  # same origin
+            "TELEGRAM_BOT_USERNAME": (bot.username or "") if bot else "",
+        }
+        body = "".join(f"window.{k} = {json.dumps(v)};\n" for k, v in values.items())
+        return Response(body, media_type="text/javascript")
 
     @app.get("/health")
     async def health():

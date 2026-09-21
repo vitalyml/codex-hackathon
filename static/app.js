@@ -12,6 +12,9 @@ const notify = $('notify'), qrLink = $('qrLink'), qrImg = $('qrImg');
 const qrFallback = $('qrFallback'), qrBadge = $('qrBadge'), qrHint = $('qrHint');
 
 const SUB_KEY = 'watcher.subscriber'; // the token survives reloads, so one scan is enough
+// The page may be served from another origin than the worker (Convex static hosting);
+// config.js says where the worker is. Empty means same origin, as under `make dev`.
+const WORKER = window.WORKER_URL || '';
 const SUB_POLL_MS = 5000;
 const usage = $('usage'), cost = $('cost'), elapsed = $('elapsed');
 let generation = 0;
@@ -133,7 +136,7 @@ function showSubscription(s) {
     return;
   }
   qrLink.href = s.telegram_link;
-  const src = `/subscriber/${s.token}/qr.svg`;
+  const src = `${WORKER}/subscriber/${s.token}/qr.svg`;
   // A failed image is retried on the next poll; comparing against the token rather than
   // the full src keeps a cache-busted retry from looping.
   if (qrImg.dataset.token !== s.token || qrImg.dataset.failed === '1') {
@@ -174,7 +177,7 @@ async function watchSubscription() {
 
 // ---------- api ----------
 async function api(path, init) {
-  const res = await fetch(path, init);
+  const res = await fetch(WORKER + path, init);
   if (res.status === 204) return null;
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw Object.assign(new Error(body.hint || body.error || res.statusText), { status: res.status, body });
@@ -391,7 +394,7 @@ function render(s) {
 
 function connectUpdates() {
   const currentSession = session;
-  updates = new EventSource(`/session/${session.session_id}/updates`);
+  updates = new EventSource(`${WORKER}/session/${session.session_id}/updates`);
   updates.onmessage = (event) => {
     if (session === currentSession) renderDetection(JSON.parse(event.data));
   };
@@ -439,7 +442,7 @@ async function refreshEvents(count) {
     events.innerHTML = '';
     for (const e of [...view.events].reverse()) {
       const li = document.createElement('li');
-      const src = `/session/${sid}/events/${e.n}.jpg`;
+      const src = `${WORKER}/session/${sid}/events/${e.n}.jpg`;
       const at = new Date(e.at).toLocaleTimeString();
       // The thumbnail is a button: the stored frame is 640px wide, so the dialog shows
       // it several times larger than the list ever can.
@@ -506,7 +509,7 @@ document.addEventListener('visibilitychange', () => {
   clearTimeout(timer);
   tick();
 });
-window.addEventListener('pagehide', () => { if (updates) updates.close(); if (session) navigator.sendBeacon && fetch(`/session/${session.session_id}`, { method: 'DELETE', keepalive: true }); releaseCamera(); });
+window.addEventListener('pagehide', () => { if (updates) updates.close(); if (session) navigator.sendBeacon && fetch(`${WORKER}/session/${session.session_id}`, { method: 'DELETE', keepalive: true }); releaseCamera(); });
 
 // ---------- dictation ----------
 // Browser-native speech-to-text for the rule box. No backend, no upload. Where the API is

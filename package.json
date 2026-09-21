@@ -3,6 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "dependencies": {
+    "@convex-dev/static-hosting": "^0.2.1",
     "convex": "^1.46.0"
+  },
+  "scripts": {
+    "build": "sh scripts/build_web.sh",
+    "deploy": "npx @convex-dev/static-hosting deploy"
   }
 }

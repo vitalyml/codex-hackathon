@@ -24,3 +24,4 @@ logs/
 .playwright-mcp/
 
 .env.local
+dist/

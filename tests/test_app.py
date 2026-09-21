@@ -352,3 +352,28 @@ def test_add_and_drop_rules_on_a_running_session(world):
     assert client.delete(f"/session/{sid}/watches/0").status_code == 409  # last one
     assert client.delete(f"/session/{sid}/watches/7").status_code == 404
     assert len(client.get(f"/session/{sid}").json()["watches"]) == 1
+
+
+def test_page_config_and_cross_origin_page(monkeypatch):
+    """The page hosted on Convex learns where things are from config.js and may call the API."""
+    site = "https://example.convex.site"
+    monkeypatch.setattr("src.config.CONVEX_URL", "https://example.convex.cloud")
+    monkeypatch.setattr("src.config.FRONTEND_ORIGIN", site)
+    app = create_app(
+        FakePerception(),
+        SessionStore(2, 30),
+        SpyNotifier(),
+        fake_bot(),
+        Subscribers(4, 3600),
+    )
+    client = TestClient(app)
+    js = client.get("/static/config.js").text
+    assert 'window.CONVEX_URL = "https://example.convex.cloud";' in js
+    assert (
+        'window.WORKER_URL = "";' in js
+        and 'window.TELEGRAM_BOT_USERNAME = "cam_bot";' in js
+    )
+    ok = client.get("/health", headers={"origin": site})
+    assert ok.headers["access-control-allow-origin"] == site
+    other = client.get("/health", headers={"origin": "https://evil.example"})
+    assert "access-control-allow-origin" not in other.headers
