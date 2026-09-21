@@ -125,3 +125,22 @@ test('a reload resumes an active session, forgets a stopped one, and obeys a rem
   assert.equal(p.run('session'), null);
   assert.ok(!p.calls.some((c) => c[1] === 'sessions:stop'));
 });
+
+test("a visitor's own expired limit never stops a session opened by a shared link", async () => {
+  const stored = { 'watcher.subscriber': 'guest' };
+  const expired = { linked: false, limitAt: Date.now() - 1000 };
+  const p = page({ stored, search: '?session=s1', answers: { 'subscribers:get': expired, 'sessions:live': live([cat]) } });
+  await p.settle();
+  assert.equal(p.run('session.id'), 's1'); // resumed from the link
+  assert.ok(p.calls.some((c) => c[1] === 'presence:heartbeat')); // at once, not in 20 s
+  p.push('subscribers:get', expired);
+  assert.equal(p.element('limit').hidden, true); // the visitor's own limit is not this session's
+  p.push('subscribers:get', { ...expired, linked: true }); // e.g. the visitor links Telegram
+  assert.equal(p.run('session.id'), 's1');
+  assert.ok(!p.calls.some((c) => c[1] === 'sessions:stop'));
+
+  p.push('sessions:live', { ...live([cat]), limitAt: Date.now() - 1 }); // the owner's limit does stop it
+  assert.equal(p.run('session'), null);
+  assert.equal(p.element('limit').hidden, false);
+  assert.equal(p.element('start').disabled, true);
+});

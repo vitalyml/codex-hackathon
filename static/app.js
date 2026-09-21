@@ -136,7 +136,8 @@ async function subscribe() {
 // The QR stays on screen whether or not the chat is linked - only the badge changes.
 // It is hidden in exactly one case: no bot is configured, so there is nothing to offer.
 function showSubscription(token, s) {
-  armLimit(s.limitAt);
+  subscriberLimit = s.limitAt;
+  if (!session) armLimit(subscriberLimit);
   if (!BOT) {
     notify.hidden = true;
     return;
@@ -176,13 +177,22 @@ qrImg.addEventListener('load', () => {
 // ---------- free limit ----------
 // Counted from the subscriber's first visit, so Stop -> Watch does not reset it. The worker
 // stops calling the model on its own; this is only the page saying why.
+// One limit applies at a time: inside a session the session's own (sessions:live), which
+// for a shared link is the owner's; outside, this browser's (subscribers:get). The banner
+// and the Watch button follow whichever is armed.
+let subscriberLimit = Infinity;
+
 function armLimit(at) {
-  clearTimeout(limitTimer);
+  clearTimeout(limitTimer); limitTimer = null;
   const left = at - Date.now();
-  if (left > 0) { limitTimer = setTimeout(() => armLimit(at), Math.min(left, 60000)); return; }
-  limit.hidden = false;
-  startBtn.disabled = true;
-  if (session) stop('Free time is over.');
+  if (left <= 0) startBtn.disabled = true;
+  else if (!limit.hidden) startBtn.disabled = false; // the limit that was over no longer applies
+  limit.hidden = left > 0;
+  if (left > 0) {
+    if (left < Infinity) limitTimer = setTimeout(() => armLimit(at), Math.min(left, 60000));
+    return;
+  }
+  if (session) stop('Free time is over.'); // last: stop() re-arms the subscriber's limit
 }
 
 // ---------- api ----------
@@ -354,6 +364,9 @@ function adopt(id, started) {
   localStorage.setItem(SESSION_KEY, id);
   history.replaceState(null, '', `?session=${id}`);
   startBtn.hidden = true; stopBtn.hidden = false; restartBtn.hidden = false;
+  // The subscriber's limit stops applying right now, not when sessions:live first answers:
+  // its timer firing in between would stop a session that may be someone else's.
+  clearTimeout(limitTimer); limitTimer = null; limit.hidden = true;
   pending = []; rule.value = '';
   startedAt = started; showElapsed(); clock = setInterval(showElapsed, 1000);
   events.innerHTML = ''; lastEventId = null; evidence.textContent = '—';
@@ -367,6 +380,7 @@ function adopt(id, started) {
     client.onUpdate('events:list', { sessionId: id }, mine(renderEvents)),
   ];
   const beat = () => client.mutation('presence:heartbeat', { sessionId: id }).catch(() => {});
+  beat(); // a resumed session may be seconds from the sweep: do not wait out the interval
   heartbeat = setInterval(beat, HEARTBEAT_MS);
   tick();
 }
@@ -408,7 +422,8 @@ function stop(message, keepCamera = false, gone = false) {
   session = null;
   forget();
   if (!keepCamera) releaseCamera();
-  startBtn.disabled = !limit.hidden; addBtn.disabled = false;
+  startBtn.disabled = false; addBtn.disabled = false;
+  armLimit(subscriberLimit); // the session's limit is gone with it; this browser's own applies again
   startBtn.hidden = false; stopBtn.hidden = true; restartBtn.hidden = true;
   renderRules();
   clearInterval(clock); clock = null;
