@@ -8,10 +8,12 @@
  * @module
  */
 
+import type * as events from "../events.js";
 import type * as lib from "../lib.js";
 import type * as presence from "../presence.js";
 import type * as sessions from "../sessions.js";
 import type * as watches from "../watches.js";
+import type * as worker from "../worker.js";
 
 import type {
   ApiFromModules,
@@ -20,10 +22,12 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  events: typeof events;
   lib: typeof lib;
   presence: typeof presence;
   sessions: typeof sessions;
   watches: typeof watches;
+  worker: typeof worker;
 }>;
 
 /**
