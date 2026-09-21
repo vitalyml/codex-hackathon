@@ -3,7 +3,14 @@
  * their tracker state, the status and limitAt, and needs no secret. */
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
-import { addUsage, checkSecret, failure, usageValidator } from "./lib";
+import { Id } from "./_generated/dataModel";
+import {
+  MAX_WATCHES,
+  addUsage,
+  checkSecret,
+  failure,
+  usageValidator,
+} from "./lib";
 import { insertWatch, watchSpec } from "./watches";
 
 /** Where to POST an event photo; the response carries the storageId for `record`. */
@@ -17,7 +24,8 @@ export const uploadUrl = mutation({
 });
 
 /** One model call answered: bill it, store each watch's new tracker state and evidence,
- * and the events that fired. Returns the Telegram chat to alert, if any. */
+ * and the events that fired. Returns the watches whose events were kept - the only ones
+ * worth an alert - and the Telegram chat to alert, if any. */
 export const record = mutation({
   args: {
     secret: v.string(),
@@ -38,11 +46,14 @@ export const record = mutation({
       }),
     ),
   },
-  returns: v.object({ chatId: v.union(v.number(), v.null()) }),
+  returns: v.object({
+    chatId: v.union(v.number(), v.null()),
+    watchIds: v.array(v.id("watches")),
+  }),
   handler: async (ctx, args) => {
     checkSecret(args.secret);
     const session = await ctx.db.get(args.sessionId);
-    if (!session) return { chatId: null };
+    if (!session) return { chatId: null, watchIds: [] };
     const repeated = session.lastCallId === args.callId;
     // Billed even if the session stopped meanwhile: the call was made.
     if (!repeated)
@@ -53,6 +64,7 @@ export const record = mutation({
     // Rules that fire on the same frame share one photo, so a photo goes only when no
     // event kept it.
     const kept = new Set<string>();
+    const watchIds: Id<"watches">[] = [];
     const uploaded = new Set(args.results.flatMap((r) => r.event?.storageId ?? []));
     for (const r of repeated ? [] : args.results) {
       const watch = await ctx.db.get(r.watchId);
@@ -68,17 +80,29 @@ export const record = mutation({
         ...r.event,
       });
       kept.add(r.event.storageId);
+      watchIds.push(watch._id);
     }
     if (!repeated)
       for (const id of uploaded) if (!kept.has(id)) await ctx.storage.delete(id);
-    // A repeat still answers "whom to alert": the first response never arrived.
-    const fired = repeated ? uploaded.size > 0 : kept.size > 0;
+    // A repeat still answers "what to alert about": the first response never arrived.
+    // What it kept are the events carrying this call's photo, and they are the session's
+    // latest: one call fires at most MAX_WATCHES and none has been recorded since.
+    if (repeated) {
+      const latest = await ctx.db
+        .query("events")
+        .withIndex("by_session", (q) => q.eq("sessionId", session._id))
+        .order("desc")
+        .take(MAX_WATCHES);
+      for (const e of latest)
+        if (uploaded.has(e.storageId)) watchIds.push(e.watchId);
+    }
     const subscriber =
-      fired && session.subscriberId
+      watchIds.length && session.subscriberId
         ? await ctx.db.get(session.subscriberId)
         : null;
     return {
       chatId: subscriber && !subscriber.muted ? (subscriber.chatId ?? null) : null,
+      watchIds,
     };
   },
 });
@@ -172,6 +196,37 @@ export const telegram = query({
             })),
         ),
       },
+    };
+  },
+});
+
+/** One saved event by id, for a button that may be older than the five on the screen.
+ * null unless its session belongs to a browser bound to this chat. Takes a string: the id
+ * comes back from a Telegram button. */
+export const event = query({
+  args: { secret: v.string(), chatId: v.number(), eventId: v.string() },
+  returns: v.union(
+    v.null(),
+    v.object({
+      at: v.number(),
+      text: v.string(),
+      rule: v.string(),
+      url: v.union(v.string(), v.null()),
+    }),
+  ),
+  handler: async (ctx, { secret, chatId, eventId }) => {
+    checkSecret(secret);
+    const id = ctx.db.normalizeId("events", eventId);
+    const e = id && (await ctx.db.get(id));
+    const session = e && (await ctx.db.get(e.sessionId));
+    const subscriber =
+      session?.subscriberId && (await ctx.db.get(session.subscriberId));
+    if (!e || !subscriber || subscriber.chatId !== chatId) return null;
+    return {
+      at: e._creationTime,
+      text: e.text,
+      rule: e.rule,
+      url: await ctx.storage.getUrl(e.storageId),
     };
   },
 });

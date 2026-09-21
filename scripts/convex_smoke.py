@@ -52,6 +52,30 @@ async def main() -> None:
         watches = view["session"]["watches"]
         assert [w["rule"] for w in watches] == ["a2", "b"], watches  # edited in place
 
+        # One answer for two rules, one of them edited away meanwhile: only the live
+        # one is kept and alerted, and a retry of the same call says the same.
+        photo = await convex.upload(b"jpg")
+        answer = {"state": True, "evidence": "seen"}
+        fired = {**answer, "event": {"text": "fired", "storageId": photo}}
+        results = [
+            {"watchId": first["id"], **fired},
+            {"watchId": watches[0]["id"], **fired},
+        ]
+        call = {"sessionId": session, "callId": "smoke", "usage": USAGE}
+        for _ in range(2):
+            recorded = await convex.mutation("worker:record", **call, results=results)
+            assert recorded == {
+                "chatId": CHAT,
+                "watchIds": [watches[0]["id"]],
+            }, recorded
+        [event] = (await convex.query("worker:telegram", chatId=CHAT))["session"][
+            "events"
+        ]
+        args = {"eventId": event["id"]}
+        assert (await convex.query("worker:event", chatId=CHAT, **args))["url"]
+        assert await convex.query("worker:event", chatId=CHAT + 1, **args) is None
+        assert await convex.query("worker:event", chatId=CHAT, eventId="nope") is None
+
         assert await convex.mutation("watches:remove", watchId=watches[1]["id"]) is None
         last = await convex.mutation("watches:remove", watchId=watches[0]["id"])
         assert last and last["error"] == "last_rule", last

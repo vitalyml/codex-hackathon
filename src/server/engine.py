@@ -148,7 +148,7 @@ async def _observe(
         watch = Watch(
             w["rule"], w["predicate"], w["direction"], tracker, observation.evidence
         )
-        fired.append((watch, text))
+        fired.append((w["id"], watch, text))
     # The next frame may no longer show what the model just saw, so a failed save is
     # retried with this very answer; callId keeps a repeat from being recorded twice.
     call_id, storage_id = secrets.token_hex(8), None
@@ -173,15 +173,17 @@ async def _observe(
                 raise
             logger.warning("session={} save failed, retrying: {}", session_id, e)
             await asyncio.sleep(SAVE_BACKOFF * attempt)
+    # A rule dropped or edited while the model was thinking left no event: no alert either.
+    fired = [f for f in fired if f[0] in recorded["watchIds"]]
     logger.info(
         "session={} usage +{} fired={} chat={}",
         session_id,
         detection.usage,
-        [w.rule for w, _ in fired],
+        [w.rule for _, w, _ in fired],
         recorded["chatId"] is not None,
     )
     at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    for w, text in fired:
+    for _, w, text in fired:
         event = Event(0, at, text, jpeg, w.rule)
         task = asyncio.create_task(
             _notify(notifier, session_id, w, event, recorded["chatId"])

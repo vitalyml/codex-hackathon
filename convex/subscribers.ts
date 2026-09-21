@@ -13,7 +13,14 @@ export const create = mutation({
     const all = await ctx.db.query("subscribers").collect();
     all.sort((a, b) => a.lastSeen - b.lastSeen);
     const excess = Math.max(0, all.length - MAX_SUBSCRIBERS + 1);
-    for (const stale of all.slice(0, excess))
+    // Never the one behind a running session: its alerts and its limit hang on this row,
+    // and nothing refreshes lastSeen while it runs. At most MAX_SESSIONS are spared.
+    const active = await ctx.db
+      .query("sessions")
+      .withIndex("by_status", (q) => q.eq("status", "active"))
+      .collect();
+    const busy = new Set(active.map((s) => s.subscriberId));
+    for (const stale of all.filter((s) => !busy.has(s._id)).slice(0, excess))
       await ctx.db.delete(stale._id);
     return await ctx.db.insert("subscribers", {
       muted: false,

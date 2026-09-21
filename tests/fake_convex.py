@@ -17,7 +17,7 @@ class FakeConvex:
         self.chat_id = None
         self.down = False
         self.lose_responses = 0  # record commits, then the response is "lost"
-        self.call_ids: set[str] = set()
+        self.kept: dict[str, list[str]] = {}  # callId -> watches whose events were kept
 
     def add(self, session_id: str, *watches: tuple[str, str, str]) -> dict:
         """watches: (rule, predicate, direction)."""
@@ -53,9 +53,9 @@ class FakeConvex:
         if self.down:
             raise ConvexError("down")
         session = self.sessions[args["sessionId"]]
-        if args["callId"] in self.call_ids:
-            return {"chatId": self.chat_id}
-        self.call_ids.add(args["callId"])
+        if args["callId"] in self.kept:
+            return {"chatId": self.chat_id, "watchIds": self.kept[args["callId"]]}
+        kept = self.kept.setdefault(args["callId"], [])
         self.usage.append(args["usage"])
         live = {w["id"]: w for w in session["watches"]}
         for r in args["results"]:
@@ -65,10 +65,11 @@ class FakeConvex:
             watch.update(state=r["state"], evidence=r["evidence"])
             if "event" in r:
                 self.events.append({"rule": watch["rule"], **r["event"]})
+                kept.append(watch["id"])
         if self.lose_responses:
             self.lose_responses -= 1
             raise ConvexError("response lost")
-        return {"chatId": self.chat_id}
+        return {"chatId": self.chat_id, "watchIds": kept}
 
     async def aclose(self) -> None:
         pass

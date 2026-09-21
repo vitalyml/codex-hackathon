@@ -320,22 +320,18 @@ async def handle(tg: Telegram, update: dict) -> Optional[Reply]:
                 for e in recent
             ] + BACK
     elif command.startswith("event:"):
-        # Only this chat's own session is searched, so an id from elsewhere finds nothing.
-        event = next(
-            (
-                e
-                for e in (session["events"] if session else [])
-                if e["id"] == command.partition(":")[2] and e["url"]
-            ),
-            None,
+        # Read by id, not from the latest five: newer events push a button's one out of
+        # that list. Convex answers only for this chat's own events.
+        event = await tg.convex.query(
+            "worker:event", chatId=chat_id, eventId=command.partition(":")[2]
         )
-        if event is None:
+        if event is None or not event["url"]:
             result.text = "⌛ <b>This moment is no longer available</b>\nOpen Recent events to see this watch's moments."
         else:
             at = _at(event["at"])
             result.image = await tg.convex.download(event["url"])
             result.text = (
-                f"🗂 <b>MOMENT {event['n'] + 1:02d}</b>\n\n"
+                "🗂 <b>MOMENT</b>\n\n"
                 + (
                     f"<blockquote>{safe(event['rule'], 250)}</blockquote>\n"
                     if event["rule"]

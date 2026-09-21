@@ -144,3 +144,27 @@ async def test_a_lost_response_is_retried_without_recording_the_answer_twice(
     assert not feed.retry  # saved on the third attempt: no second model call needed
     assert len(convex.events) == 1 and len(convex.usage) == 1
     assert len(convex.photos) == 1  # the photo is uploaded once, not per attempt
+
+
+async def test_a_rule_dropped_while_the_model_thinks_gets_no_alert(monkeypatch):
+    monkeypatch.setattr("src.server.engine.SAVE_BACKOFF", 0)
+    convex = FakeConvex()
+    convex.add("s", ("cat arrives", "cat", "rising"), ("door opens", "door", "rising"))
+    convex.lose_responses = 1  # the retry must name the same kept watches
+    sent = []
+
+    class Dropping(Answers):
+        async def detect(self, jpeg, predicates):
+            convex.sessions["s"]["watches"].pop(0)  # removed on the page meanwhile
+            return await super().detect(jpeg, predicates)
+
+    class Spy(Notifier):
+        async def notify(self, session_id, watch, event, chat_id):
+            sent.append(watch.rule)
+
+    feed = Feed()
+    await handle_frame(feed, "s", image(), Dropping([True, True]), convex, Spy())
+    await feed.task
+    await asyncio.gather(*feed.notifications)
+    assert [e["rule"] for e in convex.events] == ["door opens"]
+    assert sent == ["door opens"]
