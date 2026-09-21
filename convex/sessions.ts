@@ -65,13 +65,10 @@ export const create = internalMutation({
       .withIndex("by_status", (q) => q.eq("status", "active"))
       .collect();
     if (active.length >= MAX_SESSIONS) return { error: "full" };
-    const token = args.subscriber;
-    const subscriber = token
-      ? await ctx.db
-          .query("subscribers")
-          .withIndex("by_token", (q) => q.eq("token", token))
-          .unique()
-      : null;
+    // A string, not an id: it comes from localStorage and may be stale or garbage.
+    const subscriberId =
+      args.subscriber && ctx.db.normalizeId("subscribers", args.subscriber);
+    const subscriber = subscriberId ? await ctx.db.get(subscriberId) : null;
     if (subscriber && Date.now() > subscriber._creationTime + FREE_MS)
       return { error: "limit", hint: "free use is over" };
     const sessionId = await ctx.db.insert("sessions", {

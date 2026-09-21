@@ -40,12 +40,10 @@ export default defineSchema({
     storageId: v.id("_storage"),
   }).index("by_session", ["sessionId"]),
 
+  // A browser that may ask for Telegram alerts. Its id is the token the page keeps.
   subscribers: defineTable({
-    token: v.string(),
     chatId: v.optional(v.number()), // Telegram chat bound via /start <token>
     muted: v.boolean(),
     lastSeen: v.number(),
-  })
-    .index("by_token", ["token"])
-    .index("by_chat", ["chatId"]),
+  }).index("by_chat", ["chatId"]),
 });
