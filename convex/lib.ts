@@ -9,6 +9,8 @@ export const FREE_MS = 10 * 60 * 1000; // free use, counted from the subscriber'
 // Background tabs throttle timers to about once a minute, so anything shorter kills them.
 export const STALE_MS = 180 * 1000;
 
+export const failure = v.object({ error: v.string(), hint: v.optional(v.string()) });
+export const direction = v.union(v.literal("rising"), v.literal("falling"));
 export const usageValidator = v.object({
   prompt: v.number(),
   completion: v.number(),

@@ -11,6 +11,7 @@
 import type * as lib from "../lib.js";
 import type * as presence from "../presence.js";
 import type * as sessions from "../sessions.js";
+import type * as watches from "../watches.js";
 
 import type {
   ApiFromModules,
@@ -22,6 +23,7 @@ declare const fullApi: ApiFromModules<{
   lib: typeof lib;
   presence: typeof presence;
   sessions: typeof sessions;
+  watches: typeof watches;
 }>;
 
 /**

@@ -8,13 +8,12 @@ import {
   MAX_SESSIONS,
   MAX_WATCHES,
   addUsage,
+  direction,
+  failure,
   limitAt,
   normalize,
   usageValidator,
 } from "./lib";
-
-const failure = v.object({ error: v.string(), hint: v.optional(v.string()) });
-const direction = v.union(v.literal("rising"), v.literal("falling"));
 
 /** Normalize the rules on the worker, then create the session in one mutation. */
 export const start = action({
