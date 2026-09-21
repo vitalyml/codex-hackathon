@@ -42,15 +42,15 @@ export const record = mutation({
     await ctx.db.patch(session._id, {
       usage: addUsage(session.usage, args.usage),
     });
-    let fired = false;
+    // Rules that fire on the same frame share one photo, so a photo goes only when no
+    // event kept it.
+    const kept = new Set<string>();
+    const uploaded = new Set(args.results.flatMap((r) => r.event?.storageId ?? []));
     for (const r of args.results) {
       const watch = await ctx.db.get(r.watchId);
       // Dropped or edited (an edit gives the watch a new id) while the model was
       // thinking, or the session stopped: the answer is for nothing that exists.
-      if (!watch || session.status !== "active") {
-        if (r.event) await ctx.storage.delete(r.event.storageId);
-        continue;
-      }
+      if (!watch || session.status !== "active") continue;
       await ctx.db.patch(watch._id, { state: r.state, evidence: r.evidence });
       if (!r.event) continue;
       await ctx.db.insert("events", {
@@ -59,8 +59,10 @@ export const record = mutation({
         rule: watch.rule,
         ...r.event,
       });
-      fired = true;
+      kept.add(r.event.storageId);
     }
+    for (const id of uploaded) if (!kept.has(id)) await ctx.storage.delete(id);
+    const fired = kept.size > 0;
     const subscriber =
       fired && session.subscriberId
         ? await ctx.db.get(session.subscriberId)
