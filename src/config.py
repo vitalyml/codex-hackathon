@@ -31,6 +31,9 @@ SUBSCRIBER_TTL = float(os.getenv("SUBSCRIBER_TTL", "86400"))
 PORT = int(os.getenv("PORT", "8000"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CONVEX_URL = os.getenv("CONVEX_URL", "")  # https://<deployment>.convex.cloud
+# Shared with the Convex deployment (its WORKER_SECRET env): guards the worker-tier
+# functions there and /internal/* here.
+WORKER_SECRET = os.getenv("WORKER_SECRET", "")
 # Where the page lives when it is not served by this app (Convex static hosting);
 # that origin is allowed to call the API. Empty: same-origin only.
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "")

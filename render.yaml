@@ -25,5 +25,7 @@ services:
         sync: false
       - key: CONVEX_URL
         sync: false
+      - key: WORKER_SECRET
+        sync: false
       - key: FRONTEND_ORIGIN
         sync: false
