@@ -136,15 +136,22 @@ also why `sessions` has no `lastSeen` of its own).
     real work in the product. The request shape is unchanged. Provider, keys, model, base
     URL and prices are `OPENAI_*` settings. OpenAI reports tokens, not cost, so session cost
     is estimated from token counts and per-million prices ($2.50 in, $1.25 cached, $10.00
-    out). Frames go with image `detail: low` (`OPENAI_IMAGE_DETAIL`): measured on
-    2026-09-21 with 640 px frames, a call is 189 prompt tokens and about $0.0007, against
-    529 tokens and $0.0015 with `auto`, and $0.0004-0.0006 on Grok; accuracy on the check
-    frames is the same (3 of 3, 5 of 5), median latency 1.9 s. Prompt caching never
-    triggers and cannot help: it needs a 1,024-token identical prefix, and ours is about
-    100 tokens of text followed by a frame that differs every time. Measured: three
-    identical requests report `cached_tokens: 0`; the cache only shows up with a
-    1,209-token request repeated with the same image, or with a long static text put in
-    front, and that padding costs more than it saves ($0.0021 a call against $0.0005).
+    out). Frames go with image `detail: low` (`OPENAI_IMAGE_DETAIL`). Measured on
+    2026-09-21 with 640 px frames, ten interleaved calls per variant:
+
+    | per call        | Grok 4.20      | gpt-4o `auto` | gpt-4o `low` |
+    |-----------------|----------------|---------------|--------------|
+    | prompt tokens   | ~520           | 529           | 189          |
+    | cost            | $0.0004-0.0006 | $0.0015       | $0.0007      |
+    | median latency  | 1.24 s         | 1.61 s        | 1.46 s       |
+    | right answers   | 10/10          | 10/10         | 10/10        |
+
+    Prompt caching never triggers and cannot help: it needs a 1,024-token identical
+    prefix, and ours is about 100 tokens of text followed by a frame that differs every
+    time. Measured: three identical requests report `cached_tokens: 0`; the cache shows
+    up only with a 1,209-token request repeated with the same image, or with a long
+    static text put in front, and that padding costs more than it saves ($0.0021 a call
+    against $0.0005).
     Pointing `OPENAI_BASE_URL` at another OpenAI-compatible endpoint restores the old
     provider without a code change.
 22. **Tests:** a dict-backed `FakeConvex` for the Python engine and Telegram tests, plus one
@@ -152,10 +159,18 @@ also why `sessions` has no `lastSeen` of its own).
 23. **Rollout:** one branch (`convex`), merged only after a full smoke test; no feature
     flag. Telegram is migrated last and the app can ship without the bot
     (`TELEGRAM_BOT_TOKEN` empty) if time runs out.
-24. **Development:** the Convex dev deployment reaches a local worker through a
+24. **The worker runs in Render region `virginia`**, next to Convex (US East) and the
+    OpenAI API. Measured from Belgrade, Convex adds 0.45 s to a model call (0.20 s to
+    read the watches, 0.25 s to record) and 1.9 s to upload an event photo; with the
+    worker in the same region these are expected to drop to about 0.1 s and 0.3 s, which
+    brings a call back to the ~1.3 s it took before the migration. To be measured after
+    the first deploy. A Render region is fixed when the service is created, which
+    settles open question 1 in favour of a new service. Moving Convex to EU West was
+    rejected: it speeds up European users only, costs 1.3x and needs a new deployment.
+25. **Development:** the Convex dev deployment reaches a local worker through a
     `cloudflared` tunnel. Nothing is pushed, deployed or uploaded without the owner's
     explicit go-ahead.
-25. `hackathon.md` is maintained with the official `convex-hackathon-skill` after each work
+26. `hackathon.md` is maintained with the official `convex-hackathon-skill` after each work
     session. The Convex agent plugin is enabled for this project only, with telemetry off.
 
 ### Alternatives rejected
