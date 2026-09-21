@@ -38,7 +38,7 @@ async def test_watches_share_a_call_and_a_photo_and_state_survives_the_worker():
     sent = []
 
     class Spy(Notifier):
-        async def notify(self, session_id, watch, event):
+        async def notify(self, session_id, watch, event, chat_id):
             sent.append((watch.rule, event.text, event.image == image()))
 
     feed = Feed()

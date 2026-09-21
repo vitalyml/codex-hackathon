@@ -13,25 +13,33 @@ is called directly over `httpx`.
 
 A chat is bound to a **subscriber** — a browser, not a watch. The binding therefore
 outlives any single session, which is what lets the page show the QR before a rule
-exists. Nothing is stored between restarts.
+exists. Subscribers, chats, rules and events live in Convex (`convex/subscribers.ts`,
+the Telegram functions in `convex/worker.ts`), so a worker restart loses nothing but a
+rule entry in progress.
 
-1. `POST /subscriber` mints a token (`Subscribers.create`, `src/server/session.py`) and
-   returns `telegram_link` — `https://t.me/<bot>?start=<token>`. The page keeps the token
-   in `localStorage`, so one scan covers every later watch from that browser.
-2. The page shows the link as a QR code (`GET /subscriber/{token}/qr.svg`).
+1. The page calls `subscribers:create`; the token is the subscriber's document id. The
+   page keeps it in `localStorage`, so one scan covers every later watch from that
+   browser, and builds `https://t.me/<bot>?start=<token>` from the bot username in
+   `config.js`.
+2. The page shows the link as a QR code (`GET /subscriber/{token}/qr.svg` on the worker,
+   which needs no stored state for it).
 3. The phone opens the bot; Telegram sends `/start <token>` to the bot.
-4. `poll()` receives it, `handle()` sets `subscriber.chat_id`, the bot opens the camera dashboard
-   with **Snapshot now**, **Change rule**, **Recent events** and alert controls.
-5. `POST /session` carries the token, so the new session records `session.subscriber`.
-6. When the engine fires an event, `TelegramNotifier.notify()` resolves
-   session → subscriber → chat and sends the proof frame there. No chat bound → log only.
+4. `poll()` receives it, `handle()` calls `worker:link`, the bot opens the camera dashboard
+   with **Snapshot now**, **Rules**, **Recent events** and alert controls.
+5. `sessions:start` carries the token, so the new session records `subscriberId`.
+6. When an event fires, `worker:record` returns the chat to alert (none if the browser
+   is not linked or alerts are paused) and `TelegramNotifier.notify()` sends the proof
+   frame there. No chat → log only.
 
-The page polls `GET /subscriber/{token}` every 5 s; that `linked` flag is the only thing
-driving whether the QR is on screen. It shows whenever the browser is not linked, and
-disappears once it is.
+The page subscribes to `subscribers:get`; its `linked` flag is the only thing driving
+whether the QR is on screen. The numeric chat id never reaches the page.
 
 One camera subscriber per private chat; linking another browser disconnects the previous binding. A second scan of the same QR replaces the first chat. A token
-the server no longer knows (expired, or a restart) 404s, and the page mints a new one.
+Convex no longer knows (evicted) reads as `null`, and the page makes a new one.
+
+Every bot screen is one read, `worker:telegram`: the chat's subscriber, its latest active
+session, the watches and the latest five events. Worker memory holds only `Feeds` (the
+last frame, for snapshots) and `Telegram.editing` (who is typing a rule).
 
 ## Setup
 
@@ -57,18 +65,17 @@ Optional cosmetics in BotFather: `/setdescription`, `/setabouttext`, `/setuserpi
 
 ```python
 from src.server.telegram.bot import Bot
-from src.server.telegram.notifier import TelegramNotifier, poll
+from src.server.telegram.notifier import Telegram, TelegramNotifier, poll
 
 bot = Bot(token)
-subs = Subscribers(max_subscribers, ttl)         # browser -> chat, outlives sessions
-notifier = TelegramNotifier(bot, store, subs)    # store: SessionStore
+notifier = TelegramNotifier(bot)
 
 # at startup, inside the running event loop
 await bot.get_me()
-task = asyncio.create_task(poll(bot, store, subs, perception))   # runs until cancelled
+task = asyncio.create_task(poll(Telegram(bot, convex, feeds, perception)))
 
-# somewhere in the engine, when an event fires
-await notifier.notify(session.id, session.watch, event)
+# in the engine, when an event fires; chat_id comes from worker:record
+await notifier.notify(session_id, watch, event, chat_id)
 
 # on shutdown
 task.cancel()
@@ -76,7 +83,8 @@ await bot.aclose()
 ```
 
 `TelegramNotifier` extends the base `Notifier` and calls `super().notify()` first, so the
-log line stays. The engine depends only on `Notifier.notify(session_id, watch, event)`;
+log line stays. The engine depends only on
+`Notifier.notify(session_id, watch, event, chat_id)`;
 swap the implementation and nothing else moves.
 
 ## Chat commands
@@ -110,12 +118,13 @@ server's UTC frame receipt time, not a hardware capture timestamp.
 
 ### Changing the watch
 
-Normalization validates the replacement before applying it. Invalid rules and model
-errors leave the old watch active. The session and its event history are preserved,
-the tracker is reset, and the next available frame is analyzed using the new rule.
-In-flight results for the old watch cannot append events after replacement. The
-browser receives the new rule, predicate and direction through its existing SSE feed.
-Cancel or navigate away to leave rule-entry mode.
+Normalization (in the worker) validates the rule before `worker:putWatch` applies it.
+Invalid rules and model errors leave the old watches active. The session and its event
+history are preserved, and the next available frame is analyzed using the new rules. An
+edit gives the watch a new id at the same position, so in-flight results for the old
+wording cannot append events. The browser sees the change through its `sessions:live`
+subscription. Removing goes through the page's own `watches:remove`, which never goes
+below one rule. Cancel or navigate away to leave rule-entry mode.
 
 ## Event message
 
@@ -127,13 +136,14 @@ Photo = the frame that fired the event. Caption:
 ▎ The cat jumps onto the table
 A cat is standing on the table.
 
-Event 01 · 2026-09-12 · 14:32:10 UTC
+2026-09-12 · 14:32:10 UTC
 [📸 See now]      [🗂 Recent events]
 [🔕 Pause alerts] [Dashboard]
 ```
 
 History photos show their original event text, even after the rule changes. History
-buttons are scoped to the connected session so an old card cannot open another watch.
+buttons carry an event id that is looked up only in the chat's own session, so an old
+card cannot open another watch.
 
 ## Limits and upgrade paths
 
@@ -143,20 +153,20 @@ buttons are scoped to the connected session so an old card cannot open another w
   `setWebhook` on startup and a `POST /telegram` route that feeds updates to `respond()`.
   Updates currently run sequentially; snapshot waits and rule normalization delay later
   commands, while camera processing and event delivery remain independent.
-- **Binding lives in memory.** A server restart drops it and the user scans again;
-  `SUBSCRIBER_TTL` (default 24 h, refreshed by the page's poll) drops idle ones.
-  Persisting it means a real store keyed by the token.
-- **One chat per subscriber.** Several recipients → `chat_ids: list[int]` on `Subscriber`
-  and a loop in `notify()`.
+- **Rule entry lives in memory.** A worker restart forgets who was typing a rule; the
+  user taps Add or Edit again. Bindings, mute and history survive.
+- **One chat per subscriber.** Several recipients → a list of chat ids on the subscriber,
+  returned by `worker:record`, and a loop in `notify()`.
 - **Bot API errors** during send or reply are logged as warnings and never reach the
   frame request; a broken Telegram never slows the camera loop.
 
 ## Tests
 
-`tests/test_telegram.py` — deep link and QR, bind-before-any-rule / status / stop through
-`handle()`, fresh-frame waits and timeout behavior, rule replacement and cancellation,
-message editing, history isolation, private-chat controls and pause/resume. `tests/test_app.py` covers the
-`/subscriber` routes. Bot API is mocked with `httpx.MockTransport`; no token needed.
+`tests/test_telegram.py` — bind-before-any-rule / status / pause / disconnect through
+`handle()`, private-chat only, fresh-frame waits and timeout behavior, rule add / edit /
+drop and rejected rules, message editing, history isolation. Convex is a dict-backed fake
+in the test file; the real functions are exercised by `scripts/convex_smoke.py` against
+the dev deployment. Bot API is mocked with `httpx.MockTransport`; no token needed.
 
 ```bash
 poetry run pytest tests/test_telegram.py -v

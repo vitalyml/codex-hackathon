@@ -21,6 +21,7 @@ from src.server.engine import handle_frame
 from src.server.notifier import Notifier
 from src.server.session import Feeds
 from src.server.telegram.bot import Bot
+from src.server.telegram.notifier import Telegram, TelegramNotifier, poll
 
 STATIC = FilePath(__file__).resolve().parents[2] / "static"
 
@@ -45,9 +46,12 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        tasks = [asyncio.create_task(forget_idle_feeds())]
         if bot is not None:
             await bot.get_me()
-        tasks = [asyncio.create_task(forget_idle_feeds())]
+            tasks.append(
+                asyncio.create_task(poll(Telegram(bot, convex, feeds, perception)))
+            )
         try:
             yield
         finally:
@@ -159,7 +163,7 @@ def create_app(
 def default_app() -> FastAPI:
     perception = OpenAIPerception(config.OPENAI_API_KEYS, config.OPENAI_MODEL)
     convex = Convex(config.CONVEX_URL, config.WORKER_SECRET)
-    # The bot is here for its username and the QR only: alerts and chat commands come
-    # back when src/server/telegram moves from the old in-memory store to Convex.
+    # Without a token the app runs with no bot: the page hides the Telegram block.
     bot = Bot(config.TELEGRAM_BOT_TOKEN) if config.TELEGRAM_BOT_TOKEN else None
-    return create_app(perception, convex, Notifier(), bot)
+    notifier = TelegramNotifier(bot) if bot else Notifier()
+    return create_app(perception, convex, notifier, bot)

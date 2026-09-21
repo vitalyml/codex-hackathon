@@ -14,6 +14,7 @@ import asyncio
 import secrets
 import time
 from datetime import datetime, timezone
+from typing import Optional
 
 from loguru import logger
 
@@ -98,10 +99,14 @@ async def perceive(
 
 
 async def _notify(
-    notifier: Notifier, session_id: str, watch: Watch, event: Event
+    notifier: Notifier,
+    session_id: str,
+    watch: Watch,
+    event: Event,
+    chat_id: Optional[int],
 ) -> None:
     try:
-        await notifier.notify(session_id, watch, event)
+        await notifier.notify(session_id, watch, event, chat_id)
     except Exception:
         logger.exception("session={} notification failed", session_id)
 
@@ -178,6 +183,8 @@ async def _observe(
     at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for w, text in fired:
         event = Event(0, at, text, jpeg, w.rule)
-        task = asyncio.create_task(_notify(notifier, session_id, w, event))
+        task = asyncio.create_task(
+            _notify(notifier, session_id, w, event, recorded["chatId"])
+        )
         feed.notifications.add(task)
         task.add_done_callback(feed.notifications.discard)

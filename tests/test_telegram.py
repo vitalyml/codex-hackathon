@@ -1,11 +1,94 @@
+import asyncio
+import copy
+from unittest.mock import AsyncMock
+
 import httpx
 
-from src.server.cv.perception import Rule
-from src.server.session import Event, SessionStore, Subscribers
+from src.server.cv.perception import PerceptionError, Rule
+from src.server.session import Event, Feeds, Watch
+from src.server.telegram import notifier
 from src.server.telegram.bot import Bot
-from src.server.telegram.notifier import TelegramNotifier, handle
+from src.server.telegram.notifier import Telegram, TelegramNotifier, handle, respond
+from src.server.tracker import Tracker
 
-RULE = Rule("a cat is on the table", "rising", True)
+TOKEN = "sub1"  # the subscriber id the page keeps and the QR carries
+SESSION = "s1"
+
+
+class FakeConvex:
+    """The worker:* Telegram functions and watches:remove of convex/, over dicts."""
+
+    def __init__(self) -> None:
+        self.subscribers = {TOKEN: {"chatId": None, "muted": False}}
+        self.session: dict | None = None  # the active session of TOKEN
+        self.billed = 0
+        self.ids = 0
+
+    def start(self, *rules: str) -> dict:
+        self.session = {"id": SESSION, "watches": [], "eventCount": 0, "events": []}
+        for rule in rules:
+            self._insert(rule)
+        return self.session
+
+    def _insert(self, rule: str, at: int | None = None) -> None:
+        self.ids += 1
+        watch = {"id": f"w{self.ids}", "rule": rule, "state": None, "evidence": ""}
+        watches = self.session["watches"]
+        watches.insert(len(watches) if at is None else at, watch)
+
+    async def query(self, path: str, **args):
+        assert path == "worker:telegram", path
+        sub = next(
+            (s for s in self.subscribers.values() if s["chatId"] == args["chatId"]),
+            None,
+        )
+        # a snapshot, like a real query result
+        return sub and {"muted": sub["muted"], "session": copy.deepcopy(self.session)}
+
+    async def mutation(self, path: str, **args):
+        bound = [
+            s for s in self.subscribers.values() if s["chatId"] == args.get("chatId")
+        ]
+        if path == "worker:link":
+            if args["token"] not in self.subscribers:
+                return False
+            for s in bound:
+                s["chatId"] = None
+            self.subscribers[args["token"]]["chatId"] = args["chatId"]
+            return True
+        if path == "worker:mute":
+            for s in bound:
+                s["muted"] = args["muted"]
+        elif path == "worker:unlink":
+            for s in bound:
+                s["chatId"] = None
+        elif path == "watches:remove":
+            watches = self.session["watches"]
+            if len(watches) == 1:
+                return {"error": "last_rule"}
+            watches[:] = [w for w in watches if w["id"] != args["watchId"]]
+        elif path == "worker:putWatch":
+            self.billed += 1
+            if "watch" not in args:
+                return None
+            watches = self.session["watches"]
+            if "replaces" in args:
+                i = next(
+                    (i for i, w in enumerate(watches) if w["id"] == args["replaces"]),
+                    None,
+                )
+                if i is None:
+                    return {"error": "no_watch"}
+                del watches[i]
+                self._insert(args["watch"]["rule"], i)
+            else:
+                self._insert(args["watch"]["rule"])
+        else:
+            raise AssertionError(path)
+        return None
+
+    async def download(self, url: str) -> bytes:
+        return url.encode()
 
 
 def make_bot(calls: list) -> Bot:
@@ -36,238 +119,162 @@ def press(data: str, chat_id: int = 42) -> dict:
     }
 
 
-async def test_deep_link_bind_status_stop():
-    bot = make_bot([])
-    assert await bot.get_me() == "cam_bot"
-    store = SessionStore(max_sessions=2, ttl=30)
-    subs = Subscribers(max_subscribers=4, ttl=3600)
-    sub = subs.create()
-    assert bot.deep_link(sub.token) == f"https://t.me/cam_bot?start={sub.token}"
-    svg = bot.qr_svg(sub.token)
-    assert svg.startswith(b"<?xml") and b"<svg" in svg and b"<path" in svg
+def connected(bot=None, perception=None) -> tuple[Telegram, FakeConvex]:
+    convex = FakeConvex()
+    convex.subscribers[TOKEN]["chatId"] = 42
+    convex.start("cat arrives")
+    return (
+        Telegram(bot or AsyncMock(), convex, Feeds(), perception or AsyncMock()),
+        convex,
+    )
 
-    assert handle(store, subs, msg("hello")) is None
-    assert handle(store, subs, msg("/start")).text.startswith("👋")
-    assert handle(store, subs, msg("/start nope")).text.startswith("⌛")
-    assert handle(store, subs, msg("/status")).text.startswith("🔗")  # not linked yet
+
+def rules(convex: FakeConvex) -> list[str]:
+    return [w["rule"] for w in convex.session["watches"]]
+
+
+async def test_link_status_pause_disconnect():
+    convex = FakeConvex()
+    tg = Telegram(AsyncMock(), convex, Feeds(), AsyncMock())
+    assert await handle(tg, msg("hello")) is None
+    assert (await handle(tg, msg("/start"))).text.startswith("👋")
+    assert (await handle(tg, msg("/start nope"))).text.startswith("⌛")
+    assert (await handle(tg, msg("/status"))).text.startswith("🔗")  # not linked yet
 
     # Binding happens before any rule exists - that is the point of the subscriber.
-    r = handle(store, subs, msg(f"/start {sub.token}"))
-    assert (r.chat_id, sub.chat_id) == (42, 42)
-    assert r.buttons and handle(store, subs, press("status")).text.startswith("📷")
+    r = await handle(tg, msg(f"/start {TOKEN}"))
+    assert convex.subscribers[TOKEN]["chatId"] == 42 and r.buttons
+    assert (await handle(tg, press("status"))).text.startswith("📷")
 
     # The watch this browser starts later is picked up without a second scan.
-    s = store.create(["the cat <jumps> onto the table"], [RULE])
-    s.subscriber = sub.token
-    s.watches[0].evidence = "cat on chair"
-    r = handle(store, subs, press("status"))
+    convex.start("the cat <jumps> onto the table")["watches"][0][
+        "evidence"
+    ] = "cat on chair"
+    r = await handle(tg, press("status"))
     assert (
         r.callback_id == "cb1"
         and "&lt;jumps&gt;" in r.text  # html-escaped
         and "⏳ still looking" in r.text
         and "cat on chair" in r.text
     )
-    assert handle(store, subs, press("stop")).text.startswith("🔕")
-    assert sub.chat_id == 42 and sub.muted
-    handle(store, subs, press("disconnect"))
-    assert sub.chat_id == 42
-    handle(store, subs, press("confirm_disconnect"))
-    assert sub.chat_id is None
-    assert handle(store, subs, press("status")).text.startswith("🔗")
+    # A group chat can neither bind nor control the camera.
+    group = msg(f"/start {TOKEN}", -1)
+    group["message"]["chat"]["type"] = "group"
+    assert (await handle(tg, group)).text.startswith("🔒")
+    assert convex.subscribers[TOKEN]["chatId"] == 42
+
+    assert (await handle(tg, press("stop"))).text.startswith("🔕")
+    assert convex.subscribers[TOKEN] == {"chatId": 42, "muted": True}
+    await handle(tg, press("disconnect"))
+    assert convex.subscribers[TOKEN]["chatId"] == 42  # asks first
+    await handle(tg, press("confirm_disconnect"))
+    assert convex.subscribers[TOKEN]["chatId"] is None
+    assert (await handle(tg, press("status"))).text.startswith("🔗")
 
 
-async def test_notify_sends_photo_only_when_bound():
+async def test_notify_sends_photo_only_to_the_chat_record_named():
     calls: list = []
     bot = make_bot(calls)
-    store = SessionStore(max_sessions=2, ttl=30)
-    subs = Subscribers(max_subscribers=4, ttl=3600)
-    s = store.create(["x happens"], [RULE])
-    event = Event(
-        0, "2026-09-12T14:32:10+00:00", "a cat is on the table - became true", b"jpg"
-    )
-    notifier = TelegramNotifier(bot, store, subs)
-
-    await notifier.notify(s.id, s.watches[0], event)
-    assert calls == []  # no subscriber at all: log only
-    sub = subs.create()
-    s.subscriber = sub.token
-    await notifier.notify(s.id, s.watches[0], event)
-    assert calls == []  # subscribed but no chat bound yet: still log only
-    sub.chat_id = 42
-    await notifier.notify(s.id, s.watches[0], event)
+    assert await bot.get_me() == "cam_bot"
+    assert bot.deep_link(TOKEN) == f"https://t.me/cam_bot?start={TOKEN}"
+    assert bot.qr_svg(TOKEN).startswith(b"<?xml")
+    calls.clear()
+    watch = Watch("x happens", "x", "rising", Tracker("rising"))
+    event = Event(0, "2026-09-12T14:32:10+00:00", "x - became true", b"jpg")
+    await TelegramNotifier(bot).notify(SESSION, watch, event, None)
+    assert calls == []  # not linked or alerts paused: log only
+    await TelegramNotifier(bot).notify(SESSION, watch, event, 42)
     assert calls[0].url.path.endswith("/sendPhoto")
     body = calls[0].content
     assert (
         b'name="chat_id"\r\n\r\n42' in body
         and b"14:32:10 UTC" in body
         and b"jpg" in body
+        and b"inline_keyboard" in body
     )
-    assert b"inline_keyboard" in body
+    await bot.aclose()
 
 
-def connected():
-    store = SessionStore(2, 30)
-    subs = Subscribers(4, 3600)
-    sub = subs.create()
-    sub.chat_id = 42
-    session = store.create(["cat arrives"], [RULE])
-    session.subscriber = sub.token
-    return store, subs, sub, session
+async def test_rules_add_edit_drop_and_rejected_rules():
+    perception = AsyncMock()
+    perception.normalize.return_value = Rule("door open", "rising", True)
+    tg, convex = connected(perception=perception)
+    feed = tg.feeds.add(SESSION)
+    r = await handle(tg, press("rules"))
+    assert r.buttons[:2] == [
+        [("✏️ 01", "edit:w1"), ("🗑 01", "drop:w1")],
+        [("➕ Add rule", "add")],
+    ]
+    # Add: typed as a plain message after the button; the model is asked again.
+    await handle(tg, press("add"))
+    await respond(tg, msg("The door opens"))
+    assert rules(convex) == ["cat arrives", "The door opens"]
+    assert feed.retry and 42 not in tg.editing and convex.billed == 1
+    # Edit replaces in place under a new id; the other watch is untouched.
+    await handle(tg, press("edit:w1"))
+    await respond(tg, msg("Cat leaves"))
+    assert rules(convex) == ["Cat leaves", "The door opens"]
+    assert (await handle(tg, press("edit:w1"))).text.startswith("⌛")  # the old id
+    # Drop: never below one rule.
+    await handle(tg, press("drop:w2"))
+    assert rules(convex) == ["Cat leaves"]
+    assert "Keep at least one" in (await handle(tg, press("drop:w3"))).text
+    # Not a change, then the model is down: billed once, rules kept, entry stays open.
+    perception.normalize.return_value = Rule("cat", "rising", False)
+    await handle(tg, press("add"))
+    await respond(tg, msg("cat"))
+    perception.normalize.side_effect = PerceptionError("unavailable")
+    await respond(tg, msg("door opens"))
+    assert rules(convex) == ["Cat leaves"] and tg.editing[42] == "add"
+    assert convex.billed == 3
+    # Navigating away cancels rule entry: the next message is just chatter.
+    await handle(tg, press("events"))
+    await respond(tg, msg("door opens"))
+    assert 42 not in tg.editing and perception.normalize.await_count == 4
 
 
-async def test_snapshot_waits_for_new_frame_and_acknowledges_button():
-    import asyncio
-    from unittest.mock import AsyncMock
-
-    from src.server.telegram.notifier import respond
-
-    store, subs, sub, session = connected()
-    session.latest_frame = b"old event photo"
-    session.frame_received.set()
+async def test_snapshot_waits_for_a_fresh_frame_and_never_sends_a_stale_one(
+    monkeypatch,
+):
     bot = AsyncMock()
-    task = asyncio.create_task(
-        respond(bot, store, subs, AsyncMock(), press("snapshot"))
-    )
-    await asyncio.sleep(0)
-    bot.answer_callback.assert_awaited_once_with("cb1")
+    tg, _ = connected(bot)
+    monkeypatch.setattr(notifier, "SNAPSHOT_TIMEOUT", 0.001)
+    await respond(tg, press("snapshot"))  # no feed: the page is not sending frames
     bot.send_photo.assert_not_awaited()
-    assert not session.frame_received.is_set()
-    session.latest_frame = b"fresh camera frame"
-    session.frame_at = "2026-09-12T15:00:01+00:00"
-    session.frame_received.set()
+    assert "isn't sending frames" in bot.send_message.call_args.args[1]
+
+    monkeypatch.setattr(notifier, "SNAPSHOT_TIMEOUT", 8)
+    feed = tg.feeds.add(SESSION)
+    feed.latest_frame = b"old event photo"
+    feed.frame_received.set()
+    task = asyncio.create_task(respond(tg, press("snapshot")))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    bot.send_photo.assert_not_awaited()
+    assert not feed.frame_received.is_set()
+    feed.latest_frame = b"fresh camera frame"
+    feed.frame_at = "2026-09-12T15:00:01+00:00"
+    feed.frame_received.set()
     await task
     assert bot.send_photo.call_args.args[1] == b"fresh camera frame"
     assert "15:00:01 UTC" in bot.send_photo.call_args.args[2]
 
 
-async def test_snapshot_timeout_never_sends_stale_image(monkeypatch):
-    from unittest.mock import AsyncMock
-
-    from src.server.telegram import notifier
-
-    store, subs, sub, session = connected()
-    session.latest_frame = b"stale"
-    monkeypatch.setattr(notifier, "SNAPSHOT_TIMEOUT", 0.001)
+async def test_menu_edits_the_message_and_event_photos_are_scoped_to_the_chat():
     bot = AsyncMock()
-    await notifier.respond(bot, store, subs, AsyncMock(), press("snapshot"))
-    bot.send_photo.assert_not_awaited()
-    assert "isn't sending frames" in bot.send_message.call_args.args[1]
-
-
-async def test_pause_resume_keeps_connection_and_suppresses_only_alerts():
-    store, subs, sub, session = connected()
-    calls = []
-    bot = make_bot(calls)
-    notifier = TelegramNotifier(bot, store, subs)
-    event = Event(0, "2026-09-12T14:32:10+00:00", "cat arrived", b"jpg")
-    handle(store, subs, press("pause"))
-    await notifier.notify(session.id, session.watches[0], event)
-    assert not calls and sub.chat_id == 42
-    handle(store, subs, press("resume"))
-    await notifier.notify(session.id, session.watches[0], event)
-    assert len(calls) == 1 and not sub.muted
-    await bot.aclose()
-
-
-async def test_rules_menu_add_edit_drop_preserves_history_and_signals_browser():
-    from unittest.mock import AsyncMock
-
-    from src.server.telegram.notifier import respond
-
-    store, subs, sub, session = connected()
-    history = [Event(0, "2026-09-12T14:32:10+00:00", "cat arrived", b"jpg", "cat")]
-    session.events = history
-    perception = AsyncMock()
-    perception.normalize.return_value = Rule("door open", "rising", True)
-    # Rules screen: one row of edit/drop per watch plus Add.
-    r = handle(store, subs, press("rules"))
-    assert r.buttons[0] == [
-        ("✏️ 01", f"edit:{session.id}:0"),
-        ("🗑 01", f"drop:{session.id}:0"),
+    tg, convex = connected(bot)
+    convex.session["events"] = [
+        dict(id="e1", n=0, at=1789223530000, text="<cat>", rule="", url="jpg")
     ]
-    assert r.buttons[1] == [("➕ Add rule", "add")] and not sub.editing
-    # Add: the old watch keeps its state, the new one starts fresh.
-    session.watches[0].tracker.state = True
-    handle(store, subs, press("add"))
-    assert sub.editing == "add"
-    await respond(AsyncMock(), store, subs, perception, msg("The door opens"))
-    assert [w.rule for w in session.watches] == ["cat arrives", "The door opens"]
-    assert session.watches[0].tracker.state is True
-    assert session.watches[1].tracker.state is None
-    assert session.retry and session.changed.is_set() and session.revision == 1
-    assert not sub.editing and session.events is history
-    # Edit replaces in place; the other watch is untouched.
-    handle(store, subs, press(f"edit:{session.id}:0"))
-    assert sub.editing == "edit:0"
-    await respond(AsyncMock(), store, subs, perception, msg("Cat leaves"))
-    assert [w.rule for w in session.watches] == ["Cat leaves", "The door opens"]
-    assert session.watches[0].tracker.state is None and session.revision == 2
-    # Drop: never below one rule.
-    handle(store, subs, press(f"drop:{session.id}:1"))
-    assert [w.rule for w in session.watches] == ["Cat leaves"] and session.revision == 3
-    assert (
-        "Keep at least one" in handle(store, subs, press(f"drop:{session.id}:0")).text
-    )
-    assert len(session.watches) == 1
-    assert handle(store, subs, press(f"edit:{session.id}:5")).text.startswith("⌛")
-
-
-async def test_invalid_rule_retry_and_cancel():
-    from unittest.mock import AsyncMock
-
-    from src.server.cv.perception import PerceptionError
-    from src.server.telegram.notifier import respond
-
-    store, subs, sub, session = connected()
-    old = list(session.watches)
-    perception, bot = AsyncMock(), AsyncMock()
-    perception.normalize.return_value = Rule("cat", "rising", False)
-    handle(store, subs, press("add"))
-    await respond(bot, store, subs, perception, msg("cat"))
-    assert session.watches == old and sub.editing
-    perception.normalize.side_effect = PerceptionError("unavailable")
-    await respond(bot, store, subs, perception, msg("door opens"))
-    assert session.watches == old and sub.editing
-    handle(store, subs, press("cancel"))
-    await respond(bot, store, subs, perception, msg("door opens"))
-    assert perception.normalize.await_count == 2 and not sub.editing
-
-
-async def test_menu_edits_existing_text_and_event_access_is_scoped():
-    from unittest.mock import AsyncMock
-
-    from src.server.telegram.notifier import respond
-
-    store, subs, sub, session = connected()
-    session.events.append(Event(0, "2026-09-12T14:32:10+00:00", "<cat>", b"jpg"))
-    bot = AsyncMock()
     update = press("menu")
     update["callback_query"]["message"].update(message_id=10, text="Dashboard")
-    await respond(bot, store, subs, AsyncMock(), update)
+    await respond(tg, update)
     bot.edit_message.assert_awaited_once()
     bot.send_message.assert_not_awaited()
-    assert handle(store, subs, press(f"event:{session.id}:0")).image == b"jpg"
-    assert "&lt;cat&gt;" in handle(store, subs, press(f"event:{session.id}:0")).text
-    assert handle(store, subs, press("event:other:0")).image is None
-    assert handle(store, subs, press(f"event:{session.id}:-1")).image is None
-    assert handle(store, subs, press(f"event:{session.id}:0", 99)).image is None
-
-
-async def test_group_cannot_bind_or_control_camera():
-    from unittest.mock import AsyncMock
-
-    from src.server.telegram.notifier import respond
-
-    store, subs, sub, session = connected()
-    update = msg(f"/start {sub.token}", -1)
-    update["message"]["chat"]["type"] = "group"
-    handle(store, subs, update)
-    assert sub.chat_id == 42
-    update = msg("/rules door opens")
-    update["message"]["chat"]["type"] = "group"
-    perception = AsyncMock()
-    await respond(AsyncMock(), store, subs, perception, update)
-    perception.normalize.assert_not_awaited()
+    r = await handle(tg, press("event:e1"))
+    assert r.image == b"jpg" and "&lt;cat&gt;" in r.text
+    assert (await handle(tg, press("event:other"))).image is None
+    assert (await handle(tg, press("event:e1", 99))).image is None  # another chat
 
 
 async def test_edit_message_handles_unchanged_screen_but_preserves_api_errors():
@@ -297,11 +304,3 @@ async def test_edit_message_handles_unchanged_screen_but_preserves_api_errors():
     with pytest.raises(httpx.HTTPStatusError):
         await bot.edit_message(42, 10, "Dashboard")
     await bot.aclose()
-
-
-def test_navigating_away_cancels_rule_entry():
-    store, subs, sub, session = connected()
-    handle(store, subs, press("add"))
-    assert sub.editing
-    handle(store, subs, press("events"))
-    assert not sub.editing

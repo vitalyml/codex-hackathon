@@ -26,11 +26,9 @@ OPENAI_ATTEMPT_TIMEOUT = float(os.getenv("OPENAI_ATTEMPT_TIMEOUT", "5"))
 OPENAI_PRICE_IN = float(os.getenv("OPENAI_PRICE_IN", "2.50"))
 OPENAI_PRICE_CACHED = float(os.getenv("OPENAI_PRICE_CACHED", "1.25"))
 OPENAI_PRICE_OUT = float(os.getenv("OPENAI_PRICE_OUT", "10.00"))
-MAX_SESSIONS = int(os.getenv("MAX_SESSIONS", "10"))
-SESSION_TTL = float(os.getenv("SESSION_TTL", "30"))
-MAX_WATCHES = int(os.getenv("MAX_WATCHES", "5"))  # rules per session
-MAX_SUBSCRIBERS = int(os.getenv("MAX_SUBSCRIBERS", "20"))
-SUBSCRIBER_TTL = float(os.getenv("SUBSCRIBER_TTL", "86400"))
+# Rules per session, for the bot's texts; the limit itself (and the session and
+# subscriber caps) is enforced in convex/lib.ts.
+MAX_WATCHES = int(os.getenv("MAX_WATCHES", "5"))
 PORT = int(os.getenv("PORT", "8000"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CONVEX_URL = os.getenv("CONVEX_URL", "")  # https://<deployment>.convex.cloud

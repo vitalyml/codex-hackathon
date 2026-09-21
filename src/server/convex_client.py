@@ -56,3 +56,12 @@ class Convex:
             return str(response.json()["storageId"])
         except (httpx.HTTPError, ValueError, KeyError) as e:
             raise ConvexError(f"upload: {e}") from e
+
+    async def download(self, url: str) -> bytes:
+        """An event photo by the URL a query returned (Telegram shows it on request)."""
+        try:
+            response = await self.client.get(url)
+            response.raise_for_status()
+            return response.content
+        except httpx.HTTPError as e:
+            raise ConvexError(f"download: {e}") from e

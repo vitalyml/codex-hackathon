@@ -1,7 +1,7 @@
 """Camera control panel, event cards and Telegram update delivery."""
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import escape
 from typing import Optional
@@ -10,20 +10,10 @@ import httpx
 from loguru import logger
 
 from src.config import MAX_WATCHES
+from src.server.convex_client import Convex, ConvexError
 from src.server.cv.perception import Perception, PerceptionError
 from src.server.notifier import Notifier
-from src.server.session import (
-    Event,
-    Session,
-    SessionStore,
-    Subscriber,
-    Subscribers,
-    Watch,
-    add_watch,
-    drop_watch,
-    new_watch,
-    replace_watch,
-)
+from src.server.session import Event, Feed, Feeds, Watch
 from src.server.telegram.bot import Bot, Buttons
 
 COMMANDS = {
@@ -60,7 +50,7 @@ HELP = (
     "🗂 <b>Recent events</b> · Revisit moments with photo evidence.\n"
     "🔕 <b>Pause alerts</b> · Keep watching without messages. Resume anytime.\n\n"
     "<b>Keep the camera page open</b>\nYour browser supplies the video. If it stops sending frames, snapshots are unavailable.\n\n"
-    "Events and connections last for the current server session. Times are in UTC."
+    "Times are in UTC."
 )
 
 
@@ -68,16 +58,26 @@ def safe(text: str, limit: int = 500) -> str:
     return escape(text if len(text) <= limit else text[: limit - 1] + "…")
 
 
-def menu(sub: Subscriber) -> Buttons:
+@dataclass
+class Telegram:
+    """What the bot works with. Chats, rules and events live in Convex (`worker:telegram`
+    is one read per interaction); `editing` is the only state kept here, and it is safe
+    to lose: a restart just asks the user to tap Add or Edit again."""
+
+    bot: Bot
+    convex: Convex
+    feeds: Feeds
+    perception: Perception
+    # chat id -> rule entry in progress: "add" | "edit:<watch id>"
+    editing: dict[int, str] = field(default_factory=dict)
+
+
+def menu(muted: bool) -> Buttons:
     return [
         [("📸  Snapshot now", "snapshot")],
         [("✏️ Rules", "rules"), ("🗂 Recent events", "events")],
         [
-            (
-                ("🔔 Resume alerts", "resume")
-                if sub.muted
-                else ("🔕 Pause alerts", "pause")
-            ),
+            (("🔔 Resume alerts", "resume") if muted else ("🔕 Pause alerts", "pause")),
             ("↻ Refresh", "menu"),
         ],
         [("How it works", "help"), ("Disconnect", "disconnect")],
@@ -93,26 +93,30 @@ class Reply:
     image: Optional[bytes] = None
 
 
-def _state(w: Watch) -> str:
-    if w.tracker.state is None:
+def _at(ms: float) -> str:
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat(timespec="seconds")
+
+
+def _state(w: dict) -> str:
+    if w["state"] is None:
         return "⏳ still looking"
-    return "✅ True now" if w.tracker.state else "○ False now"
+    return "✅ True now" if w["state"] else "○ False now"
 
 
-def _watch_lines(s: Session) -> str:
+def _watch_lines(s: dict) -> str:
     return "\n".join(
-        f"<b>{i + 1:02d}</b> · {safe(w.rule, 250)}\n"
-        f"{_state(w)} · <i>{safe(w.evidence, 200) if w.evidence else 'waiting for the first observation…'}</i>"
-        for i, w in enumerate(s.watches)
+        f"<b>{i + 1:02d}</b> · {safe(w['rule'], 250)}\n"
+        f"{_state(w)} · <i>{safe(w['evidence'], 200) if w['evidence'] else 'waiting for the first observation…'}</i>"
+        for i, w in enumerate(s["watches"])
     )
 
 
-def status_text(s: Session, sub: Subscriber) -> str:
+def status_text(s: dict, muted: bool, feed: Optional[Feed]) -> str:
     age = (
         (
-            datetime.now(timezone.utc) - datetime.fromisoformat(s.frame_at)
+            datetime.now(timezone.utc) - datetime.fromisoformat(feed.frame_at)
         ).total_seconds()
-        if s.frame_at
+        if feed and feed.frame_at
         else None
     )
     connection = (
@@ -122,39 +126,37 @@ def status_text(s: Session, sub: Subscriber) -> str:
     )
     return (
         "📷 <b>CAMERA EVENTS</b>\n<i>Your eyes on what matters.</i>\n\n"
-        f"{connection}  ·  {'🔕 Alerts paused' if sub.muted else '🔔 Alerts on'}\n\n"
+        f"{connection}  ·  {'🔕 Alerts paused' if muted else '🔔 Alerts on'}\n\n"
         f"<b>WATCHING FOR</b>\n{_watch_lines(s)}\n\n"
-        f"<b>{len(s.events)}</b> events\n"
+        f"<b>{s['eventCount']}</b> events\n"
         "<i>Take a look, or adjust your rules below.</i>"
     )
 
 
-def rules_screen(s: Session) -> tuple[str, Buttons]:
+def rules_screen(s: dict) -> tuple[str, Buttons]:
+    watches = s["watches"]
     text = (
-        f"✏️ <b>YOUR RULES</b>\n<i>{len(s.watches)} of {MAX_WATCHES} · tap to edit or remove</i>\n\n"
+        f"✏️ <b>YOUR RULES</b>\n<i>{len(watches)} of {MAX_WATCHES} · tap to edit or remove</i>\n\n"
         + _watch_lines(s)
     )
     buttons: Buttons = [
-        [(f"✏️ {i + 1:02d}", f"edit:{s.id}:{i}"), (f"🗑 {i + 1:02d}", f"drop:{s.id}:{i}")]
-        for i in range(len(s.watches))
+        [(f"✏️ {i + 1:02d}", f"edit:{w['id']}"), (f"🗑 {i + 1:02d}", f"drop:{w['id']}")]
+        for i, w in enumerate(watches)
     ]
-    if len(s.watches) < MAX_WATCHES:
+    if len(watches) < MAX_WATCHES:
         buttons.append([("➕ Add rule", "add")])
     return text, buttons + BACK
 
 
-def _watch_index(session: Optional[Session], command: str) -> Optional[int]:
-    """Parse 'edit:<session>:<i>' / 'drop:<session>:<i>'; None unless it names a live watch."""
-    parts = command.split(":")
-    if (
-        session is None
-        or len(parts) != 3
-        or parts[1] != session.id
-        or not parts[2].isdigit()
-        or int(parts[2]) >= len(session.watches)
-    ):
+def _watch_index(session: Optional[dict], command: str) -> Optional[int]:
+    """Parse 'edit:<watch id>' / 'drop:<watch id>'; None unless it names a live watch.
+    Ids, not positions: a button from an old screen cannot hit a different rule."""
+    if session is None:
         return None
-    return int(parts[2])
+    watch_id = command.partition(":")[2]
+    return next(
+        (i for i, w in enumerate(session["watches"]) if w["id"] == watch_id), None
+    )
 
 
 def caption(w: Watch, event: Event) -> str:
@@ -162,17 +164,23 @@ def caption(w: Watch, event: Event) -> str:
         "🔔 <b>MOMENT DETECTED</b>\n\n"
         f"<blockquote>{safe(w.rule, 250)}</blockquote>\n"
         f"{safe(w.evidence or event.text, 450)}\n\n"
-        f"<i>Event {event.n + 1:02d} · {event.at[:10]} · {event.at[11:19]} UTC</i>"
+        f"<i>{event.at[:10]} · {event.at[11:19]} UTC</i>"
     )
 
 
-def watch_of(store: SessionStore, subscriber: Subscriber) -> Optional[Session]:
-    return next(
-        (s for s in reversed(store.all()) if s.subscriber == subscriber.token), None
-    )
+async def _view(tg: Telegram, chat_id: int) -> Optional[dict]:
+    """None: the chat is not linked. Otherwise {muted, session: None | {...}}."""
+    view: Optional[dict] = await tg.convex.query("worker:telegram", chatId=chat_id)
+    return view
 
 
-def handle(store: SessionStore, subs: Subscribers, update: dict) -> Optional[Reply]:
+def _rules_changed(tg: Telegram, session: dict) -> None:
+    feed = tg.feeds.get(session["id"])
+    if feed is not None:
+        feed.retry = True  # ask the model again even if the scene is quiet
+
+
+async def handle(tg: Telegram, update: dict) -> Optional[Reply]:
     callback = update.get("callback_query") or {}
     message = callback.get("message") or update.get("message") or {}
     chat = message.get("chat") or {}
@@ -194,39 +202,39 @@ def handle(store: SessionStore, subs: Subscribers, update: dict) -> Optional[Rep
         command = command.split("@")[0].lower()
     else:
         return None
-    sub = subs.by_chat(chat_id)
     if command == "start" and arg.strip():
-        try:
-            linked = subs.get(arg.strip())
-        except KeyError:
+        if not await tg.convex.mutation(
+            "worker:link", chatId=chat_id, token=arg.strip()
+        ):
             return Reply(chat_id, GONE)
-        if sub and sub is not linked:
-            sub.chat_id = None
-            sub.editing = None
-        linked.chat_id = chat_id
-        linked.editing = None
-        sub = linked
-    if command in {"help", "start"} and sub is None:
+        tg.editing.pop(chat_id, None)
+    view = await _view(tg, chat_id)
+    if command in {"help", "start"} and view is None:
         return Reply(chat_id, WELCOME, [[("How it works", "help_details")]])
-    if sub is not None and command != "add" and not command.startswith("edit:"):
-        sub.editing = None
+    if command != "add" and not command.startswith("edit:"):
+        tg.editing.pop(chat_id, None)
     if command in {"help", "help_details"}:
-        return Reply(chat_id, HELP, BACK if sub else None, callback.get("id"))
-    if sub is None:
+        return Reply(chat_id, HELP, BACK if view else None, callback.get("id"))
+    if view is None:
         return Reply(chat_id, NOT_LINKED, callback_id=callback.get("id"))
-    buttons = menu(sub)
-    session = watch_of(store, sub)
-    result = Reply(chat_id, "", buttons, callback.get("id"))
+    muted: bool = view["muted"]
+    session: Optional[dict] = view["session"]
+    result = Reply(chat_id, "", menu(muted), callback.get("id"))
     if command in {"menu", "status", "start", "cancel"}:
-        result.text = status_text(session, sub) if session else NO_WATCH
+        result.text = (
+            status_text(session, muted, tg.feeds.get(session["id"]))
+            if session
+            else NO_WATCH
+        )
     elif command in {"pause", "stop", "resume"}:
-        sub.muted = command != "resume"
+        muted = command != "resume"
+        await tg.convex.mutation("worker:mute", chatId=chat_id, muted=muted)
         result.text = (
             "🔕 <b>Alerts paused</b>\n\nYour camera keeps watching and saving events.\nTap <b>Resume alerts</b> whenever you're ready."
-            if sub.muted
+            if muted
             else "🔔 <b>You're back on watch</b>\n\nNew moments will arrive here as they happen."
         )
-        result.buttons = menu(sub)
+        result.buttons = menu(muted)
     elif command == "disconnect":
         result.text = "🔗 <b>Disconnect this camera?</b>\n\nYou'll need to scan its QR code again to reconnect. To silence alerts, use Pause instead."
         result.buttons = [
@@ -234,7 +242,7 @@ def handle(store: SessionStore, subs: Subscribers, update: dict) -> Optional[Rep
             [("Keep connected", "menu")],
         ]
     elif command == "confirm_disconnect":
-        sub.chat_id = None
+        await tg.convex.mutation("worker:unlink", chatId=chat_id)
         result.text = "🔗 <b>Camera disconnected</b>\nScan the QR code on your camera page to reconnect."
         result.buttons = None
     elif command in {"rules", "rule"}:
@@ -245,11 +253,11 @@ def handle(store: SessionStore, subs: Subscribers, update: dict) -> Optional[Rep
     elif command == "add":
         if session is None:
             result.text = NO_WATCH
-        elif len(session.watches) >= MAX_WATCHES:
+        elif len(session["watches"]) >= MAX_WATCHES:
             result.text = f"✏️ <b>Rule limit reached</b>\n\nUp to {MAX_WATCHES} rules per camera. Remove one to add another."
             result.buttons = [[("‹ Rules", "rules")]]
         else:
-            sub.editing = "add"
+            tg.editing[chat_id] = "add"
             result.text = (
                 "➕ <b>What else should I watch for?</b>\n\n"
                 "Send the new rule as a message. Describe a change, for example:\n\n"
@@ -263,10 +271,10 @@ def handle(store: SessionStore, subs: Subscribers, update: dict) -> Optional[Rep
             result.text = "⌛ <b>This rule is no longer there</b>\nOpen Rules to see the current list."
             result.buttons = [[("‹ Rules", "rules")]]
         else:
-            sub.editing = f"edit:{i}"
+            tg.editing[chat_id] = f"edit:{session['watches'][i]['id']}"
             result.text = (
                 f"✏️ <b>Edit rule {i + 1:02d}</b>\n\n"
-                f"<b>Now</b>\n<blockquote>{safe(session.watches[i].rule)}</blockquote>\n"
+                f"<b>Now</b>\n<blockquote>{safe(session['watches'][i]['rule'])}</blockquote>\n"
                 "Send the new wording as a message. It replaces this rule; its state starts over.\n\n"
                 "The current rule keeps running until the new one is ready."
             )
@@ -276,59 +284,64 @@ def handle(store: SessionStore, subs: Subscribers, update: dict) -> Optional[Rep
         if session is None or i is None:
             result.text = "⌛ <b>This rule is no longer there</b>\nOpen Rules to see the current list."
             result.buttons = [[("‹ Rules", "rules")]]
-        elif len(session.watches) == 1:
+        # The page's own mutation: it refuses to go below one rule, atomically.
+        elif await tg.convex.mutation(
+            "watches:remove", watchId=session["watches"][i]["id"]
+        ):
             result.text = "✏️ <b>Keep at least one rule</b>\n\nAdd another before removing this one, or stop the watch on the camera page."
             result.buttons = [[("‹ Rules", "rules")]]
         else:
-            dropped = session.watches[i]
-            drop_watch(session, i)
+            dropped = session["watches"].pop(i)
+            _rules_changed(tg, session)
             result.text, result.buttons = rules_screen(session)
             result.text = (
-                f"🗑 <b>Removed</b> · {safe(dropped.rule, 200)}\n\n" + result.text
+                f"🗑 <b>Removed</b> · {safe(dropped['rule'], 200)}\n\n" + result.text
             )
     elif command == "events":
-        if session is None or not session.events:
+        if session is None or not session["events"]:
             result.text = "🗂 <b>The best moments go here</b>\n\nNo events yet. When your rule triggers, you'll find the photo and time here."
             result.buttons = BACK
         else:
-            recent = list(reversed(session.events[-5:]))
+            recent = session["events"]  # the latest five, newest first
             result.text = (
                 "🗂 <b>RECENT MOMENTS</b>\n<i>Latest five events · tap to see the photo</i>\n\n"
                 + "\n\n".join(
-                    f"<b>{e.n + 1:02d}</b> · {e.at[11:19]} UTC\n{safe(e.rule or e.text, 180)}"
+                    f"<b>{e['n'] + 1:02d}</b> · {_at(e['at'])[11:19]} UTC\n{safe(e['rule'] or e['text'], 180)}"
                     for e in recent
                 )
             )
             result.buttons = [
                 [
                     (
-                        f"📷 Event {e.n + 1:02d} · {e.at[11:19]}",
-                        f"event:{session.id}:{e.n}",
+                        f"📷 Event {e['n'] + 1:02d} · {_at(e['at'])[11:19]}",
+                        f"event:{e['id']}",
                     )
                 ]
                 for e in recent
             ] + BACK
     elif command.startswith("event:"):
-        parts = command.split(":")
-        if (
-            session is None
-            or len(parts) != 3
-            or parts[1] != session.id
-            or not parts[2].isdigit()
-            or int(parts[2]) >= len(session.events)
-        ):
+        # Only this chat's own session is searched, so an id from elsewhere finds nothing.
+        event = next(
+            (
+                e
+                for e in (session["events"] if session else [])
+                if e["id"] == command.partition(":")[2] and e["url"]
+            ),
+            None,
+        )
+        if event is None:
             result.text = "⌛ <b>This moment is no longer available</b>\nOpen Recent events to see this watch's moments."
         else:
-            event = session.events[int(parts[2])]
-            result.image = event.image
+            at = _at(event["at"])
+            result.image = await tg.convex.download(event["url"])
             result.text = (
-                f"🗂 <b>MOMENT {event.n + 1:02d}</b>\n\n"
+                f"🗂 <b>MOMENT {event['n'] + 1:02d}</b>\n\n"
                 + (
-                    f"<blockquote>{safe(event.rule, 250)}</blockquote>\n"
-                    if event.rule
+                    f"<blockquote>{safe(event['rule'], 250)}</blockquote>\n"
+                    if event["rule"]
                     else ""
                 )
-                + f"{safe(event.text, 650)}\n\n<i>{event.at[:10]} · {event.at[11:19]} UTC</i>"
+                + f"{safe(event['text'], 650)}\n\n<i>{at[:10]} · {at[11:19]} UTC</i>"
             )
             result.buttons = [[("‹ Recent events", "events"), ("Dashboard", "menu")]]
     elif command == "snapshot":
@@ -340,13 +353,101 @@ def handle(store: SessionStore, subs: Subscribers, update: dict) -> Optional[Rep
     return result
 
 
-async def respond(
-    bot: Bot,
-    store: SessionStore,
-    subs: Subscribers,
-    perception: Perception,
-    update: dict,
-) -> None:
+async def _enter_rule(tg: Telegram, chat_id: int, text: str, mode: str) -> Reply:
+    """A rule typed in the chat: normalize it here, insert it in Convex. `mode` is
+    "add" or "edit:<watch id>"."""
+    rule = text.partition(" ")[2].strip() if text.startswith("/") else text
+    view = await _view(tg, chat_id)
+    session = view and view["session"]
+    if not view or not session:
+        return Reply(chat_id, NO_WATCH, BACK)
+    if not rule or len(rule) > 500:
+        return Reply(
+            chat_id,
+            "✏️ Please send a rule between 1 and 500 characters.",
+            [[("Cancel", "cancel")]],
+        )
+    await tg.bot.chat_action(chat_id, "typing")
+    try:
+        spec = await tg.perception.normalize(rule)
+    except PerceptionError:
+        return Reply(
+            chat_id,
+            "⚠️ <b>Couldn't understand that rule</b>\nYour current rules are still running. Please try again.",
+            [[("Cancel", "rules")]],
+        )
+    # One mutation bills the call and changes the rules, and refuses if the session
+    # stopped, the limit is reached or the edited rule is gone meanwhile.
+    args: dict = {"sessionId": session["id"], "usage": spec.usage.wire()}
+    if spec.is_transition:
+        args["watch"] = {
+            "rule": rule,
+            "predicate": spec.predicate,
+            "direction": spec.direction,
+        }
+        if mode != "add":
+            args["replaces"] = mode.partition(":")[2]
+    failed = await tg.convex.mutation("worker:putWatch", **args)
+    if failed and failed["error"] == "no_session":
+        return Reply(
+            chat_id,
+            "⌛ Your camera session changed. Open the dashboard and try again.",
+            BACK,
+        )
+    if not spec.is_transition:
+        return Reply(
+            chat_id,
+            "✏️ <b>Describe something that changes</b>\nTry: <i>Someone enters the room</i>.\nYour rules are unchanged.",
+            [[("Cancel", "rules")]],
+        )
+    tg.editing.pop(chat_id, None)
+    if failed:
+        return Reply(
+            chat_id,
+            "⌛ <b>Your rules changed meanwhile</b>\nOpen Rules and try again.",
+            [[("‹ Rules", "rules")]],
+        )
+    _rules_changed(tg, session)
+    view = await _view(tg, chat_id) or view
+    session = view["session"] or session
+    return Reply(
+        chat_id,
+        ("➕ <b>Rule added</b>" if mode == "add" else "✅ <b>Rule updated</b>")
+        + "\n\n"
+        + status_text(session, view["muted"], tg.feeds.get(session["id"])),
+        menu(view["muted"]),
+    )
+
+
+async def _snapshot(tg: Telegram, chat_id: int) -> Optional[Reply]:
+    """None: not linked or no watch - handle() already said so."""
+    view = await _view(tg, chat_id)
+    session = view and view["session"]
+    if not session:
+        return None
+    await tg.bot.chat_action(chat_id, "upload_photo")
+    feed = tg.feeds.get(session["id"])
+    try:
+        if feed is None:  # no frame since the worker started or for FEED_TTL
+            raise asyncio.TimeoutError
+        feed.frame_received.clear()
+        await asyncio.wait_for(feed.frame_received.wait(), timeout=SNAPSHOT_TIMEOUT)
+    except asyncio.TimeoutError:
+        return Reply(
+            chat_id,
+            "🟠 <b>Camera isn't sending frames</b>\n\nKeep the camera page open with a watch running, then try again.",
+            [[("📸 Try again", "snapshot")]] + BACK,
+        )
+    return Reply(
+        chat_id,
+        f"📸 <b>RIGHT NOW</b>\n\nFresh from your camera.\n<i>{feed.frame_at[:10]} · {feed.frame_at[11:19]} UTC</i>",
+        [[("📸 Take another", "snapshot"), ("Dashboard", "menu")]],
+        image=feed.latest_frame,
+    )
+
+
+async def respond(tg: Telegram, update: dict) -> None:
+    bot = tg.bot
     callback = update.get("callback_query") or {}
     message = callback.get("message") or update.get("message") or {}
     chat = message.get("chat") or {}
@@ -355,7 +456,6 @@ async def respond(
     if "id" not in chat:
         return
     chat_id = chat["id"]
-    sub = subs.by_chat(chat_id)
     text = (message.get("text") or "").strip()
     command = (
         callback.get("data", "")
@@ -364,117 +464,25 @@ async def respond(
             text.split(" ")[0].split("@")[0][1:].lower() if text.startswith("/") else ""
         )
     )
-    reply = handle(store, subs, update)
+    editing = tg.editing.get(chat_id)  # before handle(): a command cancels rule entry
+    reply = await handle(tg, update)
     private = chat.get("type", "private") == "private"
     if (
         private
-        and sub
         and not callback
         and (
-            sub.editing
+            editing
             and not text.startswith("/")
             or command in {"rule", "rules"}
             and " " in text
         )
     ):
-        mode = sub.editing or "add"  # "/rules <text>" adds
-        rule = text.partition(" ")[2].strip() if text.startswith("/") else text
-        session = watch_of(store, sub)
-        if session is None:
-            reply = Reply(chat_id, NO_WATCH, BACK)
-        elif not rule or len(rule) > 500:
-            reply = Reply(
-                chat_id,
-                "✏️ Please send a rule between 1 and 500 characters.",
-                [[("Cancel", "cancel")]],
-            )
-        else:
-            await bot.chat_action(chat_id, "typing")
-            try:
-                spec = await perception.normalize(rule)
-            except PerceptionError:
-                reply = Reply(
-                    chat_id,
-                    "⚠️ <b>Couldn't understand that rule</b>\nYour current rules are still running. Please try again.",
-                    [[("Cancel", "rules")]],
-                )
-            else:
-                session.usage += spec.usage
-                if (
-                    session.closed
-                    or sub.chat_id != chat_id
-                    or watch_of(store, sub) is not session
-                ):
-                    reply = Reply(
-                        chat_id,
-                        "⌛ Your camera session changed. Open the dashboard and try again.",
-                        BACK,
-                    )
-                elif not spec.is_transition:
-                    reply = Reply(
-                        chat_id,
-                        "✏️ <b>Describe something that changes</b>\nTry: <i>Someone enters the room</i>.\nYour rules are unchanged.",
-                        [[("Cancel", "rules")]],
-                    )
-                else:
-                    watch = new_watch(rule, spec)
-                    done = (
-                        add_watch(session, watch, MAX_WATCHES)
-                        if mode == "add"
-                        else replace_watch(session, int(mode.partition(":")[2]), watch)
-                    )
-                    sub.editing = None
-                    if not done:
-                        reply = Reply(
-                            chat_id,
-                            "⌛ <b>Your rules changed meanwhile</b>\nOpen Rules and try again.",
-                            [[("‹ Rules", "rules")]],
-                        )
-                    else:
-                        reply = Reply(
-                            chat_id,
-                            (
-                                "➕ <b>Rule added</b>"
-                                if mode == "add"
-                                else "✅ <b>Rule updated</b>"
-                            )
-                            + "\n\n"
-                            + status_text(session, sub),
-                            menu(sub),
-                        )
-    elif private and command == "snapshot" and sub:
-        session = watch_of(store, sub)
-        if session:
-            await bot.chat_action(chat_id, "upload_photo")
-            session.frame_received.clear()
-            try:
-                await asyncio.wait_for(
-                    session.frame_received.wait(), timeout=SNAPSHOT_TIMEOUT
-                )
-            except asyncio.TimeoutError:
-                reply = Reply(
-                    chat_id,
-                    "🟠 <b>Camera isn't sending frames</b>\n\nKeep the camera page open with a watch running, then try again.",
-                    [[("📸 Try again", "snapshot")]] + BACK,
-                )
-            else:
-                if (
-                    session.closed
-                    or sub.chat_id != chat_id
-                    or watch_of(store, sub) is not session
-                ):
-                    reply = Reply(
-                        chat_id,
-                        "⌛ Your camera session changed. Please try again.",
-                        BACK,
-                    )
-                else:
-                    reply = Reply(
-                        chat_id,
-                        f"📸 <b>RIGHT NOW</b>\n\nFresh from your camera.\n<i>{session.frame_at[:10]} · {session.frame_at[11:19]} UTC</i>",
-                        [[("📸 Take another", "snapshot"), ("Dashboard", "menu")]],
-                        image=session.latest_frame,
-                    )
+        # "/rules <text>" adds
+        reply = await _enter_rule(
+            tg, chat_id, text, (editing or "add") if not command else "add"
+        )
+    elif private and command == "snapshot":
+        reply = await _snapshot(tg, chat_id) or reply
     if reply is None:
         return
     if reply.image is not None:
@@ -488,21 +496,18 @@ async def respond(
 
 
 class TelegramNotifier(Notifier):
-    def __init__(self, bot: Bot, store: SessionStore, subs: Subscribers) -> None:
-        self.bot, self.store, self.subs = bot, store, subs
+    def __init__(self, bot: Bot) -> None:
+        self.bot = bot
 
-    async def notify(self, session_id: str, watch: Watch, event: Event) -> None:
-        await super().notify(session_id, watch, event)
-        try:
-            token = self.store.get(session_id).subscriber
-            sub = self.subs.get(token) if token else None
-        except KeyError:
-            return
-        if sub is None or sub.chat_id is None or sub.muted:
+    async def notify(
+        self, session_id: str, watch: Watch, event: Event, chat_id: Optional[int]
+    ) -> None:
+        await super().notify(session_id, watch, event, chat_id)
+        if chat_id is None:  # not linked, or alerts paused: worker:record decides
             return
         try:
             await self.bot.send_photo(
-                sub.chat_id,
+                chat_id,
                 event.image,
                 caption(watch, event),
                 [
@@ -514,15 +519,13 @@ class TelegramNotifier(Notifier):
             logger.warning("session={} telegram send failed: {}", session_id, e)
 
 
-async def poll(
-    bot: Bot, store: SessionStore, subs: Subscribers, perception: Perception
-) -> None:
+async def poll(tg: Telegram) -> None:
     """One polling instance. Updates are ordered so rule edits and cancellation agree."""
-    await bot.set_commands(COMMANDS)
+    await tg.bot.set_commands(COMMANDS)
     offset = 0
     while True:
         try:
-            updates = await bot.get_updates(offset)
+            updates = await tg.bot.get_updates(offset)
         except httpx.HTTPError as e:
             logger.warning("telegram poll failed: {!r}", e)
             await asyncio.sleep(3)
@@ -530,6 +533,6 @@ async def poll(
         for update in updates:
             offset = update["update_id"] + 1
             try:
-                await respond(bot, store, subs, perception, update)
-            except httpx.HTTPError as e:
+                await respond(tg, update)
+            except (httpx.HTTPError, ConvexError) as e:
                 logger.warning("telegram reply failed: {}", e)
