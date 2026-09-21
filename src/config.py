@@ -16,6 +16,9 @@ OPENAI_API_KEYS = [
     k.strip() for k in os.getenv("OPENAI_API_KEYS", "").split(",") if k.strip()
 ]
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+# low: the frame costs a flat 85 tokens instead of ~430, and the page sends 640 px
+# frames anyway. auto | high bring the detail back if small objects get missed.
+OPENAI_IMAGE_DETAIL = os.getenv("OPENAI_IMAGE_DETAIL", "low")
 OPENAI_REQUEST_TIMEOUT = float(os.getenv("OPENAI_REQUEST_TIMEOUT", "10"))
 OPENAI_ATTEMPT_TIMEOUT = float(os.getenv("OPENAI_ATTEMPT_TIMEOUT", "5"))
 # USD per 1M tokens. The API reports tokens, not money, so the page's cost counter is

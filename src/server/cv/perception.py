@@ -17,6 +17,7 @@ from loguru import logger
 from src.config import (
     OPENAI_ATTEMPT_TIMEOUT,
     OPENAI_BASE_URL,
+    OPENAI_IMAGE_DETAIL,
     OPENAI_PRICE_CACHED,
     OPENAI_PRICE_IN,
     OPENAI_PRICE_OUT,
@@ -243,7 +244,10 @@ class OpenAIPerception:
         raw, usage = await self._ask(
             [
                 {"type": "text", "text": DETECT_PROMPT.format(predicates=numbered)},
-                {"type": "image_url", "image_url": {"url": image}},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image, "detail": OPENAI_IMAGE_DETAIL},
+                },
             ],
             max_tokens=48 + 48 * len(predicates),
         )

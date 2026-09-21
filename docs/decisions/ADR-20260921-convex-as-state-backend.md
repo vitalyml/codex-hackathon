@@ -136,8 +136,15 @@ also why `sessions` has no `lastSeen` of its own).
     real work in the product. The request shape is unchanged. Provider, keys, model, base
     URL and prices are `OPENAI_*` settings. OpenAI reports tokens, not cost, so session cost
     is estimated from token counts and per-million prices ($2.50 in, $1.25 cached, $10.00
-    out); prompt caching will not trigger because a request is about 700 tokens and the
-    threshold is 1,024. Expected cost is about $0.002 per call, roughly four times Grok.
+    out). Frames go with image `detail: low` (`OPENAI_IMAGE_DETAIL`): measured on
+    2026-09-21 with 640 px frames, a call is 189 prompt tokens and about $0.0007, against
+    529 tokens and $0.0015 with `auto`, and $0.0004-0.0006 on Grok; accuracy on the check
+    frames is the same (3 of 3, 5 of 5), median latency 1.9 s. Prompt caching never
+    triggers and cannot help: it needs a 1,024-token identical prefix, and ours is about
+    100 tokens of text followed by a frame that differs every time. Measured: three
+    identical requests report `cached_tokens: 0`; the cache only shows up with a
+    1,209-token request repeated with the same image, or with a long static text put in
+    front, and that padding costs more than it saves ($0.0021 a call against $0.0005).
     Pointing `OPENAI_BASE_URL` at another OpenAI-compatible endpoint restores the old
     provider without a code change.
 22. **Tests:** a dict-backed `FakeConvex` for the Python engine and Telegram tests, plus one
@@ -230,6 +237,5 @@ and the rewrites of `src/server/engine.py`, `src/server/session.py`,
    (no data or users there, and functions cannot be checked any other way). Git pushes,
    the production deployment, the static-site upload and secrets still need the owner's
    explicit go-ahead.
-3. **The `gpt-4o` check on real frames** (`scripts/vision_check.py`: 3 of 3 frames, 5 of 5
-   cases, median latency near 2 s, and whether image `detail: low` passes) waits for an
-   OpenAI API key. `README.md` cost figures are rewritten after it.
+3. ~~The `gpt-4o` check on real frames.~~ Done 2026-09-21, see decision 21. `README.md`
+   cost figures are still to be rewritten.
