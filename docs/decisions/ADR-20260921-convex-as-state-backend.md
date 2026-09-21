@@ -1,7 +1,8 @@
 # ADR-20260921: Make Convex the State Backend, Keep the Python Worker for Vision
 
-Status: accepted 2026-09-21. Implementation in progress on branch `convex`. Nothing in
-section "Open" is undecided any more; what is left is work, listed under "Still to come".
+Status: accepted 2026-09-21. The code is complete on branch `convex` (local commits) and
+runs locally against the Convex dev deployment. Nothing in section "Open" is undecided;
+what is left is the rollout, listed under "Still to come".
 
 ## Context
 
@@ -210,9 +211,22 @@ Done on branch `convex` (local commits, nothing pushed to git):
   `convex/watches.ts`, `convex/events.ts`, `convex/worker.ts`, `convex/subscribers.ts`,
   `convex/crons.ts` (created; checked against the dev deployment with `npx convex run`)
 
-Still to come: the Telegram functions in `convex/worker.ts`, `src/server/convex_client.py`,
-and the rewrites of `src/server/engine.py`, `src/server/session.py`,
-`src/server/telegram/notifier.py`, `static/app.js`, the affected tests, and `README.md`.
+- `src/server/convex_client.py`, `tests/fake_convex.py`, `tests/test_convex_client.py`
+  (created); `src/server/engine.py`, `src/server/session.py`, `src/server/notifier.py`,
+  `tests/test_engine.py`, `tests/test_session.py`, `tests/test_web_client.js` (rewritten)
+- Telegram: `telegram`, `link`, `mute`, `unlink`, `putWatch` in `convex/worker.ts`;
+  `src/server/telegram/notifier.py`, its `README.md` and `tests/test_telegram.py`
+  rewritten over them. The old in-memory `SessionStore`/`Subscribers` are deleted. The
+  alert caption lost its event number: numbers are list positions now (see Data model),
+  and the engine does not read the list.
+- `scripts/convex_smoke.py` (created): the smoke script of decision 22, a session from
+  start to stop through the page's and the bot's functions, against the dev deployment.
+
+Still to come, in order: a full run by hand through the tunnel (camera, event photo,
+reload, the 10-minute limit, the bot); `README.md` (architecture, gpt-4o cost figures);
+`hackathon.md`; then, each on the owner's go-ahead: the Render service in `virginia`, the
+Convex production deployment with its environment, the static-site upload, the merge
+into `master`, the demo video and the submission.
 
 ## Consequences
 
