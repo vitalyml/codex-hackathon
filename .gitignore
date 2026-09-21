@@ -22,3 +22,5 @@ logs/
 # Tool caches
 .code-review-graph/
 .playwright-mcp/
+
+.env.local
