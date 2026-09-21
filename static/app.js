@@ -12,13 +12,22 @@ const notify = $('notify'), qrLink = $('qrLink'), qrImg = $('qrImg');
 const qrFallback = $('qrFallback'), qrBadge = $('qrBadge'), qrHint = $('qrHint');
 
 const SUB_KEY = 'watcher.subscriber'; // the token survives reloads, so one scan is enough
+const SESSION_KEY = 'watcher.session'; // so does the session: a reload resumes it
 // The page may be served from another origin than the worker (Convex static hosting);
 // config.js says where the worker is. Empty means same origin, as under `make dev`.
 const WORKER = window.WORKER_URL || '';
-const SUB_POLL_MS = 5000;
+const BOT = window.TELEGRAM_BOT_USERNAME || '';
+const HEARTBEAT_MS = 20000;
+// All state lives in Convex: the page reads it through live queries and changes it through
+// mutations and actions. Only camera frames go to the worker.
+const client = window.CONVEX_URL ? new convex.ConvexClient(window.CONVEX_URL) : null;
 const usage = $('usage'), cost = $('cost'), elapsed = $('elapsed');
+const limit = $('limit'), pay = $('pay');
 let generation = 0;
-let updates = null, lastRevision = -1, announcedEvents = 0;
+let unsubscribe = []; // live queries of the running session
+let heartbeat = null, limitTimer = null;
+let lastEventId = null; // null until the first event list arrives: history is not news
+let force = false;      // the rules changed: the next frame asks the model even if nothing moves
 let startedAt = 0, clock = null;
 function showElapsed() {
   const s = Math.floor((Date.now() - startedAt) / 1000);
@@ -28,16 +37,15 @@ function showElapsed() {
 const FRAME_WIDTH = 640, JPEG_QUALITY = 0.8;
 const MAX_OUTSTANDING = 2; // at most this many uploads in flight at once
 // Nobody is looking at a hidden tab, and every frame costs tokens — so the loop idles while
-// the page is out of sight. The updates stream stays open, and that is what keeps the
-// server-side session alive across a pause of any length.
+// the page is out of sight. The heartbeat keeps going, and that is what keeps the session
+// alive across a pause.
 const paused = () => document.visibilityState === 'hidden';
-let session = null;      // {session_id, watches: [{rule, predicate, direction, state, evidence}]}
+let session = null;      // {id, watches: [{id, rule, predicate, direction, state, evidence}]}
 let pending = [];        // rules typed before Watch; once a session runs, session.watches is the list
 let timer = null;        // setTimeout handle for the sampling loop
 let outstanding = 0;     // uploads currently in flight
 let uploadSeq = 0;       // increasing tag for each upload, to detect out-of-order responses
 let lastRenderedSeq = -1;
-let knownEvents = 0;
 let facing = 'environment'; // which camera to ask for; survives stop/start
 
 // ---------- camera ----------
@@ -114,30 +122,29 @@ function grabJpeg() {
 let subscriber = null;
 
 async function subscribe() {
-  const saved = localStorage.getItem(SUB_KEY);
-  if (saved) {
-    try {
-      return await api(`/subscriber/${saved}`); // still known to this server?
-    } catch (e) {
-      if (e.status !== 404) throw e; // 404: expired, or a server restart wiped it
-    }
+  let token = localStorage.getItem(SUB_KEY);
+  // null: evicted, or from another deployment. The page makes a new one.
+  if (token && !(await client.query('subscribers:get', { token }))) token = null;
+  if (!token) {
+    token = await client.mutation('subscribers:create', {});
+    localStorage.setItem(SUB_KEY, token);
   }
-  const fresh = await api('/subscriber', { method: 'POST' });
-  localStorage.setItem(SUB_KEY, fresh.token);
-  return fresh;
+  subscriber = token;
+  client.onUpdate('subscribers:get', { token }, (s) => { if (s) showSubscription(token, s); });
 }
 
 // The QR stays on screen whether or not the chat is linked - only the badge changes.
 // It is hidden in exactly one case: no bot is configured, so there is nothing to offer.
-function showSubscription(s) {
-  subscriber = s.token;
-  if (!s.telegram_link) {
+function showSubscription(token, s) {
+  armLimit(s.limitAt);
+  if (!BOT) {
     notify.hidden = true;
     return;
   }
-  qrLink.href = s.telegram_link;
+  s = { token, linked: s.linked };
+  qrLink.href = `https://t.me/${BOT}?start=${token}`;
   const src = `${WORKER}/subscriber/${s.token}/qr.svg`;
-  // A failed image is retried on the next poll; comparing against the token rather than
+  // A failed image is retried on the next update; comparing against the token rather than
   // the full src keeps a cache-busted retry from looping.
   if (qrImg.dataset.token !== s.token || qrImg.dataset.failed === '1') {
     qrImg.dataset.token = s.token;
@@ -166,13 +173,16 @@ qrImg.addEventListener('load', () => {
   delete qrImg.dataset.retry;
 });
 
-async function watchSubscription() {
-  try {
-    showSubscription(await subscribe());
-  } catch (e) {
-    notify.hidden = true; // no channel to offer - the page still works without one
-  }
-  setTimeout(watchSubscription, SUB_POLL_MS);
+// ---------- free limit ----------
+// Counted from the subscriber's first visit, so Stop -> Watch does not reset it. The worker
+// stops calling the model on its own; this is only the page saying why.
+function armLimit(at) {
+  clearTimeout(limitTimer);
+  const left = at - Date.now();
+  if (left > 0) { limitTimer = setTimeout(() => armLimit(at), Math.min(left, 60000)); return; }
+  limit.hidden = false;
+  startBtn.disabled = true;
+  if (session) stop('Free time is over.');
 }
 
 // ---------- api ----------
@@ -200,7 +210,9 @@ async function tick() {
     const jpeg = await grabJpeg();
     if (session !== currentSession) return;
     fd.append('frame', jpeg, 'frame.jpg');
-    const s = await api(`/session/${currentSession.session_id}/frame`, { method: 'POST', body: fd });
+    const forced = force;
+    const s = await api(`/session/${currentSession.id}/frame${forced ? '?force=1' : ''}`, { method: 'POST', body: fd });
+    if (forced && s.sent) force = false;
     // Concurrent uploads can resolve out of order — drop a response older than
     // the newest one already rendered.
     if (session !== currentSession) return;
@@ -210,7 +222,7 @@ async function tick() {
     }
   } catch (e) {
     if (session !== currentSession) return;
-    if (e.status === 404) { stop('Session expired — start again.'); return; }
+    if (e.status === 404) { stop('Session expired — start again.', false, true); return; }
     say(`Upload failed: ${e.message}`, true);
   } finally {
     if (session === currentSession) outstanding--;
@@ -219,8 +231,8 @@ async function tick() {
 
 // ---------- rules ----------
 // One list, two sources: `pending` before Watch, the server's watches once a session runs.
-// Adding and removing go through the same buttons either way; while running they also
-// hit the server, and the updates stream brings back the list (Telegram edits included).
+// Adding and removing go through the same buttons either way; while running they change
+// Convex, and the live query brings back the list (Telegram edits included).
 function renderRules() {
   const list = session ? session.watches : pending.map((r) => ({ rule: r }));
   rules.innerHTML = '';
@@ -264,20 +276,14 @@ async function addRule() {
   const currentSession = session;
   say('Understanding the rule…');
   try {
-    const r = await api(`/session/${currentSession.session_id}/watches`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ rule: text }),
-    });
+    const failed = await client.action('watches:add', { sessionId: currentSession.id, rule: text });
     if (session !== currentSession) return;
-    session.watches = r.watches;
+    if (failed) { say(failed.hint || failed.error, true); return; }
     rule.value = '';
-    renderRules();
-    renderUsage(r.usage);
+    force = true;
     say('Watching.');
   } catch (e) {
-    if (session !== currentSession) return;
-    if (e.status === 404) { stop('Session expired — start again.'); return; }
-    say(e.message, true);
+    if (session === currentSession) say(e.message, true);
   } finally {
     addBtn.disabled = false;
   }
@@ -291,14 +297,12 @@ async function removeRule(i) {
   }
   const currentSession = session;
   try {
-    await api(`/session/${currentSession.session_id}/watches/${i}`, { method: 'DELETE' });
+    const failed = await client.mutation('watches:remove', { watchId: currentSession.watches[i].id });
     if (session !== currentSession) return;
-    session.watches.splice(i, 1); // the stream confirms shortly; don't wait for it
-    renderRules();
+    if (failed) say(failed.hint || failed.error, true);
+    else force = true;
   } catch (e) {
-    if (session !== currentSession) return;
-    if (e.status === 404) { stop('Session expired — start again.'); return; }
-    say(e.message, true);
+    if (session === currentSession) say(e.message, true);
   }
 }
 
@@ -324,150 +328,159 @@ async function start(rules) {
   }
   if (attempt !== generation) return;
   say(rules.length > 1 ? 'Understanding the rules…' : 'Understanding the rule…');
+  let created;
   try {
-    const created = await api('/session', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ rules, subscriber: subscriber }),
-    });
-    if (attempt !== generation) {
-      api(`/session/${created.session_id}`, { method: 'DELETE' }).catch(() => {});
-      return;
-    }
-    session = created;
+    created = await client.action('sessions:start', { rules, subscriber: subscriber || undefined });
   } catch (e) {
-    if (attempt !== generation) return;
-    startBtn.disabled = false;
-    if (e.status === 503) { say('The room is full right now. Try again in a minute.', true); return; }
-    say(e.message, true);
+    created = { error: 'convex', hint: e.message };
+  }
+  if (attempt !== generation) {
+    if (created.sessionId) client.mutation('sessions:stop', { sessionId: created.sessionId }).catch(() => {});
     return;
   }
   startBtn.disabled = false;
+  if (created.error) {
+    if (created.error === 'full') say('The room is full right now. Try again in a minute.', true);
+    else if (created.error === 'limit') armLimit(0);
+    else say(created.hint || created.error, true);
+    return;
+  }
+  adopt(created.sessionId, Date.now());
+}
+
+// A session this page runs: just started, or found again after a reload or by a shared link.
+function adopt(id, started) {
+  session = { id, watches: [] };
+  localStorage.setItem(SESSION_KEY, id);
+  history.replaceState(null, '', `?session=${id}`);
   startBtn.hidden = true; stopBtn.hidden = false; restartBtn.hidden = false;
   pending = []; rule.value = '';
-  lastRevision = -1; announcedEvents = 0;
-  renderUsage(session.usage);
-  startedAt = Date.now(); showElapsed(); clock = setInterval(showElapsed, 1000);
-  renderRules();
-  events.innerHTML = ''; knownEvents = 0; evidence.textContent = '—';
-  outstanding = 0; uploadSeq = 0; lastRenderedSeq = -1;
+  startedAt = started; showElapsed(); clock = setInterval(showElapsed, 1000);
+  events.innerHTML = ''; lastEventId = null; evidence.textContent = '—';
+  outstanding = 0; uploadSeq = 0; lastRenderedSeq = -1; force = false;
   setPill(statePill, 'unknown', 'idle');
   say('Watching.');
-  connectUpdates();
+  const current = session;
+  const mine = (render) => (value) => { if (session === current) render(value); };
+  unsubscribe = [
+    client.onUpdate('sessions:live', { sessionId: id }, mine(renderLive)),
+    client.onUpdate('events:list', { sessionId: id }, mine(renderEvents)),
+  ];
+  const beat = () => client.mutation('presence:heartbeat', { sessionId: id }).catch(() => {});
+  heartbeat = setInterval(beat, HEARTBEAT_MS);
   tick();
+}
+
+// On load: `?session=` (a shared link) wins over what this browser remembers.
+async function resume() {
+  const id = new URLSearchParams(location.search).get('session') || localStorage.getItem(SESSION_KEY);
+  if (!id) return;
+  const view = await client.query('sessions:live', { sessionId: id });
+  if (view && view.status === 'active') {
+    if (!session) adopt(id, view.startedAt);
+    return;
+  }
+  forget();
+  if (view) say('Session expired — start again.');
+}
+
+function forget() {
+  localStorage.removeItem(SESSION_KEY);
+  history.replaceState(null, '', location.pathname);
 }
 
 async function restart() {
   if (!session) return;
-  const deletion = stop(undefined, true);
+  const stopping = stop(undefined, true);
   const attempt = generation;
-  await deletion;
+  await stopping;
   if (attempt === generation) await start(rulesToStart());
 }
 
-function stop(message, keepCamera = false) {
+// `gone`: Convex already says the session is over, so there is nothing to stop there.
+function stop(message, keepCamera = false, gone = false) {
   generation++;
-  if (updates) { updates.close(); updates = null; }
+  unsubscribe.forEach((off) => off()); unsubscribe = [];
+  clearInterval(heartbeat); heartbeat = null;
   clearTimeout(timer); timer = null;
-  const deletion = session ? api(`/session/${session.session_id}`, { method: 'DELETE' }).catch(() => {}) : Promise.resolve();
+  const stopping = session && !gone ? client.mutation('sessions:stop', { sessionId: session.id }).catch(() => {}) : Promise.resolve();
   if (session) pending = session.watches.map((w) => w.rule); // the rules stay editable for the next Watch
   session = null;
+  forget();
   if (!keepCamera) releaseCamera();
-  startBtn.disabled = false; addBtn.disabled = false;
+  startBtn.disabled = !limit.hidden; addBtn.disabled = false;
   startBtn.hidden = false; stopBtn.hidden = true; restartBtn.hidden = true;
   renderRules();
   clearInterval(clock); clock = null;
   setPill(gatePill, keepCamera ? 'ready' : 'camera off', 'idle'); setPill(statePill, 'no rule', 'idle');
   say(message || 'Stopped.');
-  return deletion;
+  return stopping;
 }
 
 // ---------- render ----------
 const GATE_LABEL = { first: 'first frame', skip: 'quiet', change: 'change', light: 'light changed' };
 const GATE_TONE = { first: 'send', skip: 'idle', change: 'warn', light: 'info' };
 
+// The worker's answer to a frame: only what the gate did with it. Everything else about
+// the session comes from Convex.
 function render(s) {
   if (!session) return; // response arrived after Stop cleared the session — nothing to render
   const label = s.sent ? 'asking the model' : s.busy ? 'model busy' : GATE_LABEL[s.gate] + (s.streak ? ` ×${s.streak}` : '');
   setPill(gatePill, label, s.sent ? 'send' : GATE_TONE[s.gate]);
-  renderDetection(s);
 }
 
-function connectUpdates() {
-  const currentSession = session;
-  updates = new EventSource(`${WORKER}/session/${session.session_id}/updates`);
-  updates.onmessage = (event) => {
-    if (session === currentSession) renderDetection(JSON.parse(event.data));
-  };
-  updates.addEventListener('expired', () => {
-    if (session === currentSession) stop('Session expired — start again.');
-  });
-}
-
-function renderDetection(s) {
-  if (!session || (s.revision !== undefined && s.revision < lastRevision)) return;
-  if (s.revision !== undefined) lastRevision = s.revision;
-  if (s.watches) {
-    session.watches = s.watches; // Telegram may have edited the rules
-    renderRules();
-    const known = s.watches.filter((w) => w.state !== null);
-    const yes = known.filter((w) => w.state).length;
-    if (!known.length) setPill(statePill, 'unknown', 'idle');
-    else if (s.watches.length === 1) setPill(statePill, yes ? 'TRUE' : 'false', yes ? 'true' : 'false');
-    else setPill(statePill, `${yes}/${s.watches.length} true`, yes ? 'true' : 'false');
-    const seen = s.watches.map((w) => w.evidence).filter(Boolean);
-    evidence.textContent = seen.length ? seen.map((e) => `“${e}”`).join(' · ') : '—';
-  }
-  if (s.events > knownEvents) refreshEvents(s.events);
-  if (s.events > announcedEvents) {
-    announcedEvents = s.events;
-    flash(); showToast('Event! ' + (s.last_event || ''));
-  }
-  if (s.usage) renderUsage(s.usage);
+function renderLive(view) {
+  // Stopped by the sweep after a long sleep, from another tab, or deleted.
+  if (!view || view.status !== 'active') { stop('Session expired — start again.', false, true); return; }
+  session.watches = view.watches; // Telegram may have edited the rules
+  renderRules();
+  const known = view.watches.filter((w) => w.state !== null);
+  const yes = known.filter((w) => w.state).length;
+  if (!known.length) setPill(statePill, 'unknown', 'idle');
+  else if (view.watches.length === 1) setPill(statePill, yes ? 'TRUE' : 'false', yes ? 'true' : 'false');
+  else setPill(statePill, `${yes}/${view.watches.length} true`, yes ? 'true' : 'false');
+  const seen = view.watches.map((w) => w.evidence).filter(Boolean);
+  evidence.textContent = seen.length ? seen.map((e) => `“${e}”`).join(' · ') : '—';
+  renderUsage(view.usage);
+  armLimit(view.limitAt);
 }
 
 function renderUsage(u) {
-  usage.textContent = u.total.toLocaleString();
+  const usd = u.usdTicks / 1e10; // an estimate: tokens times the configured prices
+  usage.textContent = (u.prompt + u.completion).toLocaleString();
   usage.title = `${u.prompt} in / ${u.completion} out, ${u.calls} calls`;
-  cost.textContent = u.usd < 0.01 ? `$${u.usd.toFixed(4)}` : `$${u.usd.toFixed(2)}`;
+  cost.textContent = usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
 }
 
-// Fetches the event list and only advances knownEvents once it actually succeeds,
-// so a Stop or a failed request mid-refresh never drops an event or throws unhandled.
-async function refreshEvents(count) {
-  if (!session) return;
-  const sid = session.session_id;
-  try {
-    const view = await api(`/session/${sid}`);
-    if (!session || session.session_id !== sid) return; // stopped (or restarted) mid-refresh
-    events.innerHTML = '';
-    for (const e of [...view.events].reverse()) {
-      const li = document.createElement('li');
-      const src = `${WORKER}/session/${sid}/events/${e.n}.jpg`;
-      const at = new Date(e.at).toLocaleTimeString();
-      // The thumbnail is a button: the stored frame is 640px wide, so the dialog shows
-      // it several times larger than the list ever can.
-      const shot = document.createElement('button');
-      shot.type = 'button';
-      shot.className = 'shot';
-      shot.setAttribute('aria-label', `Open larger view: ${e.text}, ${at}`);
-      const img = document.createElement('img');
-      img.src = src;
-      img.alt = e.text;
-      img.loading = 'lazy';
-      shot.append(img);
-      shot.addEventListener('click', () => openShot(src, e.text, at));
-      const cap = document.createElement('div');
-      const b = document.createElement('b');
-      b.textContent = e.rule ? `${e.rule} — ${e.text}` : e.text;
-      const time = document.createElement('time');
-      time.textContent = at;
-      cap.append(b, time);
-      li.append(shot, cap);
-      events.append(li);
-    }
-    knownEvents = count;
-  } catch (e) {
-    // Leave knownEvents alone — the next status with more events retries the refresh.
+// The latest 50, oldest first; shown newest first.
+function renderEvents(list) {
+  const newest = list.length ? list[list.length - 1] : null;
+  if (newest && lastEventId !== null && newest.id !== lastEventId) { flash(); showToast('Event! ' + newest.text); }
+  lastEventId = newest ? newest.id : '';
+  events.innerHTML = '';
+  for (const e of [...list].reverse()) {
+    const li = document.createElement('li');
+    const at = new Date(e.at).toLocaleTimeString();
+    // The thumbnail is a button: the stored frame is 640px wide, so the dialog shows
+    // it several times larger than the list ever can.
+    const shot = document.createElement('button');
+    shot.type = 'button';
+    shot.className = 'shot';
+    shot.setAttribute('aria-label', `Open larger view: ${e.text}, ${at}`);
+    const img = document.createElement('img');
+    img.src = e.url || '';
+    img.alt = e.text;
+    img.loading = 'lazy';
+    shot.append(img);
+    shot.addEventListener('click', () => openShot(e.url, e.text, at));
+    const cap = document.createElement('div');
+    const b = document.createElement('b');
+    b.textContent = e.rule ? `${e.rule} — ${e.text}` : e.text;
+    const time = document.createElement('time');
+    time.textContent = at;
+    cap.append(b, time);
+    li.append(shot, cap);
+    events.append(li);
   }
 }
 
@@ -509,7 +522,10 @@ document.addEventListener('visibilitychange', () => {
   clearTimeout(timer);
   tick();
 });
-window.addEventListener('pagehide', () => { if (updates) updates.close(); if (session) navigator.sendBeacon && fetch(`${WORKER}/session/${session.session_id}`, { method: 'DELETE', keepalive: true }); releaseCamera(); });
+// The session is not stopped here: a reload resumes it, and one that never comes back is
+// stopped by the sweep once its heartbeats end.
+window.addEventListener('pagehide', releaseCamera);
+pay.addEventListener('click', () => showToast('Payments are not wired up — this is a hackathon demo.'));
 
 // ---------- dictation ----------
 // Browser-native speech-to-text for the rule box. No backend, no upload. Where the API is
@@ -564,7 +580,13 @@ window.addEventListener('pagehide', () => { if (updates) updates.close(); if (se
   mic.hidden = false;
 })();
 
-watchSubscription();
-openCamera()
-  .then(revealFlipIfMultiCamera)
-  .catch((e) => say(`Camera unavailable: ${e.message}. Use https:// or localhost.`, true));
+if (!client) {
+  say('This page is not configured: config.js has no CONVEX_URL.', true);
+} else {
+  subscribe().catch(() => { notify.hidden = true; }); // no channel to offer - the page still works
+  openCamera()
+    .then(revealFlipIfMultiCamera)
+    .catch((e) => say(`Camera unavailable: ${e.message}. Use https:// or localhost.`, true))
+    .then(resume)
+    .catch((e) => say(e.message, true));
+}

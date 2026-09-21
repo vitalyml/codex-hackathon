@@ -109,6 +109,7 @@ export const live = query({
         }),
       ),
       usage: usageValidator,
+      startedAt: v.number(),
       limitAt: v.number(),
       telegram: v.boolean(),
     }),
@@ -135,6 +136,7 @@ export const live = query({
         evidence: w.evidence,
       })),
       usage: session.usage,
+      startedAt: session._creationTime,
       limitAt: await limitAt(ctx, session),
       telegram: subscriber?.chatId !== undefined,
     };

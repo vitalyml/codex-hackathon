@@ -1,186 +1,127 @@
+// node --test tests/test_web_client.js — static/app.js against a fake Convex client.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const { test } = require('node:test');
 
-function page() {
+function page({ stored = {}, search = '', answers = {} } = {}) {
   const elements = new Map();
-  const element = (id) => {
-    if (!elements.has(id)) elements.set(id, {
-      textContent: '', value: '1000', disabled: false, dataset: {},
-      classList: { add() {}, remove() {}, toggle() {} },
-      addEventListener() {}, removeAttribute(name) { delete this[name]; },
-    });
-    return elements.get(id);
-  };
+  const make = () => ({
+    textContent: '', value: '1000', disabled: false, hidden: false, dataset: {}, children: [],
+    classList: { add() {}, remove() {}, toggle() {} },
+    addEventListener() {}, removeAttribute(name) { delete this[name]; }, setAttribute() {},
+    append(...kids) { this.children.push(...kids); }, focus() {},
+    set innerHTML(_) { this.children = []; },
+  });
+  const element = (id) => elements.get(id) || elements.set(id, make()).get(id);
+  const calls = [], subscriptions = [];
+  class ConvexClient {
+    async query(name, args) { calls.push(['query', name, args]); return answer(name, args); }
+    async mutation(name, args) { calls.push(['mutation', name, args]); return answer(name, args); }
+    async action(name, args) { calls.push(['action', name, args]); return answer(name, args); }
+    onUpdate(name, args, callback) {
+      const sub = { name, args, callback, active: true };
+      subscriptions.push(sub);
+      return () => { sub.active = false; };
+    }
+  }
+  const answer = (name, args) => (typeof answers[name] === 'function' ? answers[name](args) : answers[name]);
+  const storage = { ...stored };
   const context = vm.createContext({
     document: {
-      getElementById: element, body: { classList: { add() {}, remove() {} } },
-      addEventListener(name, handler) { this.handlers[name] = handler; }, handlers: {},
-      visibilityState: 'visible',
+      getElementById: element, createElement: make, body: { classList: { add() {}, remove() {} } },
+      addEventListener() {}, visibilityState: 'visible',
     },
-    navigator: { mediaDevices: { getUserMedia: () => new Promise(() => {}) } },
-    window: { addEventListener() {} },
-    localStorage: { getItem() { return null; }, setItem() {} },
+    navigator: { mediaDevices: { getUserMedia: async () => ({ getTracks: () => [] }) } },
+    window: { addEventListener() {}, CONVEX_URL: 'https://x.convex.cloud', TELEGRAM_BOT_USERNAME: 'cam_bot' },
+    convex: { ConvexClient },
+    location: { search, pathname: '/' },
+    history: { replaceState(_, __, url) { context.location.search = url.startsWith('?') ? url : ''; } },
+    URLSearchParams,
+    localStorage: {
+      getItem: (k) => (k in storage ? storage[k] : null),
+      setItem: (k, v) => { storage[k] = v; }, removeItem: (k) => { delete storage[k]; },
+    },
     fetch: () => new Promise(() => {}),
     setTimeout() { return 1; }, clearTimeout() {},
     setInterval() { return 1; }, clearInterval() {},
-    EventSource: class { constructor(url) { this.url = url; } addEventListener() {} close() { this.closed = true; } },
-    FormData: class { append() {} }, Date,
+    FormData: class { append() {} }, Date, Promise,
   });
+  element('limit').hidden = true;
+  element('video').readyState = 1;
+  element('video').videoWidth = 1280; element('video').videoHeight = 720;
   const run = (code) => vm.runInContext(code, context);
   run(fs.readFileSync('static/app.js', 'utf8'));
-  return { context, element, run };
+  const push = (name, value) => subscriptions.filter((s) => s.active && s.name === name).forEach((s) => s.callback(value));
+  const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+  return { element, run, calls, subscriptions, push, settle, storage };
 }
 
-for (const outcome of ['success', '404']) {
-  test(`old upload ${outcome} cannot affect a replacement session`, async () => {
-    const { context, element, run } = page();
-    run(`
-      grabJpeg = async () => ({}); video.readyState = 2;
-      session = { session_id: 'old' };
-      api = () => new Promise((resolve, reject) => { globalThis.resolveUpload = resolve; globalThis.rejectUpload = reject; });
-      globalThis.pending = tick();
-    `);
-    await Promise.resolve();
-    run("session = { session_id: 'new' }; outstanding = 0; uploadSeq = 0; lastRenderedSeq = -1;");
-    if (outcome === '404') context.rejectUpload({ status: 404 });
-    else context.resolveUpload({ state: true, evidence: 'old result', events: 0, gate: 'skip' });
-    await context.pending;
-    assert.equal(run('session.session_id'), 'new');
-    assert.equal(run('outstanding'), 0);
-    assert.equal(element('evidence').textContent, '');
-  });
-}
+const live = (watches, status = 'active') => ({
+  status, watches, startedAt: Date.now(), limitAt: Date.now() + 600000, telegram: false,
+  usage: { prompt: 700, completion: 30, calls: 1, usdTicks: 20500000 },
+});
+// Objects made inside the vm context have another realm's prototypes: compare as JSON.
+const same = (actual, expected) => assert.equal(JSON.stringify(actual), JSON.stringify(expected));
+const cat = { id: 'w1', rule: 'cat arrives', predicate: 'a cat is visible', direction: 'rising', state: null, evidence: '' };
 
-test('stop during JPEG capture does not upload to a replacement session', async () => {
-  const { context, run } = page();
-  run(`
-    session = { session_id: 'old' }; video.readyState = 2;
-    grabJpeg = () => new Promise(r => { globalThis.finishCapture = r; });
-    globalThis.uploads = 0; api = async () => { globalThis.uploads++; };
-    globalThis.pending = tick();
-    session = { session_id: 'new' }; outstanding = 0;
-  `);
-  context.finishCapture({});
-  await context.pending;
-  assert.equal(context.uploads, 0);
-  assert.equal(run('outstanding'), 0);
+test('Watch starts a session in Convex, live queries drive the page, Stop ends it', async () => {
+  const p = page({ answers: { 'subscribers:create': 'sub1', 'sessions:start': { sessionId: 's1' } } });
+  await p.settle();
+  await p.run("start(['cat arrives'])");
+  same(p.calls.find((c) => c[1] === 'sessions:start')[2], { rules: ['cat arrives'], subscriber: 'sub1' });
+  assert.equal(p.storage['watcher.session'], 's1');
+
+  p.push('sessions:live', live([{ ...cat, state: true, evidence: 'a tabby on the sofa' }]));
+  assert.equal(p.element('state').textContent, 'TRUE');
+  assert.equal(p.element('evidence').textContent, '“a tabby on the sofa”');
+  assert.equal(p.element('usage').textContent, '730');
+  assert.equal(p.element('cost').textContent, '$0.0021');
+
+  const event = { id: 'e1', at: Date.now(), text: 'a cat is visible - became true', rule: 'cat arrives', url: 'https://x/p.jpg' };
+  p.push('events:list', [event]); // what was there when the page subscribed is history, not news
+  assert.equal(p.element('toast').textContent, '');
+  p.push('events:list', [event, { ...event, id: 'e2', text: 'again' }]);
+  assert.equal(p.element('toast').textContent, 'Event! again');
+  assert.equal(p.element('events').children.length, 2);
+
+  await p.run('stop()');
+  same(p.calls.at(-1), ['mutation', 'sessions:stop', { sessionId: 's1' }]);
+  assert.ok(p.subscriptions.filter((s) => s.name !== 'subscribers:get').every((s) => !s.active));
+  assert.equal(p.storage['watcher.session'], undefined);
+  assert.equal(p.run('pending[0]'), 'cat arrives'); // the rules stay for the next Watch
 });
 
-test('a hidden tab uploads nothing and resumes when it comes back', async () => {
-  const { context, run } = page();
-  run(`
-    session = { session_id: 'live' }; video.readyState = 2;
-    grabJpeg = async () => ({});
-    globalThis.uploads = 0; api = async () => { uploads++; return { gate: 'skip', events: 0 }; };
-    document.visibilityState = 'hidden';
-  `);
-  await run('tick()');
-  assert.equal(context.uploads, 0);
-  assert.equal(run('outstanding'), 0);
-  run("document.visibilityState = 'visible';");
-  await run('tick()');
-  assert.equal(context.uploads, 1);
+test('Stop while the session is still being created stops the one that arrives late', async () => {
+  let created;
+  const p = page({ answers: { 'subscribers:create': 'sub1', 'sessions:start': () => new Promise((r) => { created = r; }) } });
+  await p.settle();
+  const starting = p.run("start(['cat arrives'])");
+  await p.settle();
+  p.run('stop()');
+  created({ sessionId: 'late' });
+  await starting;
+  assert.equal(p.run('session'), null);
+  same(p.calls.at(-1), ['mutation', 'sessions:stop', { sessionId: 'late' }]);
 });
 
-test('coming back into view resumes at once instead of waiting out a throttled timer', async () => {
-  const { context, run } = page();
-  run(`
-    session = { session_id: 'live' }; video.readyState = 2;
-    grabJpeg = async () => ({});
-    globalThis.uploads = 0; api = async () => { uploads++; return { gate: 'skip', events: 0 }; };
-    timer = 7; globalThis.cleared = [];
-    clearTimeout = (t) => { cleared.push(t); };
-  `);
-  await context.document.handlers.visibilitychange();
-  assert.deepEqual(Array.from(context.cleared), [7]);
-  assert.equal(context.uploads, 1);
-});
+test('a reload resumes an active session, forgets a stopped one, and obeys a remote stop', async () => {
+  const stored = { 'watcher.subscriber': 'sub1', 'watcher.session': 's1' };
+  const known = { 'subscribers:get': { linked: false, limitAt: Date.now() + 600000 } };
 
-test('Telegram subscription survives Stop and is attached to the next session', async () => {
-  const { element, run } = page();
-  run(`
-    showSubscription({ token: 'browser', telegram_link: 'https://t.me/cam?start=browser', linked: true });
-    video.srcObject = { getTracks: () => [] };
-    globalThis.createdBodies = [];
-    api = async (path, init) => {
-      if (init.method === 'DELETE') return;
-      createdBodies.push(JSON.parse(init.body));
-      return { session_id: 'new', predicate: 'present', direction: 'rising', usage: {total: 0, usd: 0} };
-    };
-  `);
-  await run("start('arrives')");
-  assert.equal(run('createdBodies[0].subscriber'), 'browser');
-  await run('stop()');
-  assert.equal(element('notify').hidden, false);
-  assert.equal(element('qrLink').href, 'https://t.me/cam?start=browser');
-  assert.equal(element('qrImg').src, '/subscriber/browser/qr.svg');
-  run('video.srcObject = { getTracks: () => [] };');
-  await run("start('leaves')");
-  assert.equal(run('createdBodies[1].subscriber'), 'browser');
-});
+  const gone = page({ stored, answers: { ...known, 'sessions:live': live([cat], 'stopped') } });
+  await gone.settle();
+  assert.equal(gone.run('session'), null);
+  assert.equal(gone.storage['watcher.session'], undefined);
+  assert.equal(gone.element('status').textContent, 'Session expired — start again.');
 
-test('Stop cancels pending session creation and deletes its eventual result', async () => {
-  const { context, run } = page();
-  run(`
-    video.srcObject = { getTracks: () => [] };
-    globalThis.deleted = [];
-    api = (path, init) => init.method === 'DELETE'
-      ? (deleted.push(path), Promise.resolve())
-      : new Promise(r => { globalThis.finishCreate = r; });
-    globalThis.pending = start('arrives');
-    stop();
-  `);
-  context.finishCreate({ session_id: 'late' });
-  await context.pending;
-  assert.equal(run('session'), null);
-  assert.deepEqual(Array.from(context.deleted), ['/session/late']);
-});
-
-test('Reset waits for deletion and leaves usable controls if creation fails', async () => {
-  const { context, element, run } = page();
-  run(`
-    session = { session_id: 'old' };
-    video.srcObject = { getTracks: () => [] };
-    globalThis.creations = 0;
-    api = (path, init) => init.method === 'DELETE'
-      ? new Promise(r => { globalThis.finishDelete = r; })
-      : (globalThis.creations++, Promise.reject({status: 503}));
-    globalThis.pending = restart();
-  `);
-  assert.equal(context.creations, 0);
-  context.finishDelete();
-  await context.pending;
-  assert.equal(context.creations, 1);
-  assert.equal(run('session'), null);
-  assert.equal(element('start').hidden, false);
-  assert.equal(element('start').disabled, false);
-  assert.equal(element('rule').disabled, false);
-});
-
-test('push delivers event immediately, rejects stale frame status and closes on Stop', () => {
-  const { element, run } = page();
-  run(`
-    session = { session_id: 'new', predicate: 'present' };
-    globalThis.refreshes = 0; refreshEvents = () => { refreshes++; };
-    connectUpdates(); globalThis.source = updates;
-    source.onmessage({data: JSON.stringify({revision: 2, state: true, evidence: 'fresh', events: 1})});
-  `);
-  assert.equal(element('state').textContent, 'TRUE');
-  assert.equal(element('toast').textContent, 'Event! present');
-  run("renderDetection({revision: 1, state: false, evidence: 'stale', events: 0});");
-  assert.equal(element('evidence').textContent, '“fresh”');
-  run("api = async () => {}; stop(); source.onmessage({data: JSON.stringify({revision: 3, state: false, events: 0})});");
-  assert.equal(run('source.closed'), true);
-  assert.equal(element('state').textContent, 'no rule');
-});
-
-test('Telegram rule changes update the camera page through detection status', () => {
-  const { element, run } = page();
-  run(`session = { session_id: 'camera', predicate: 'cat present', direction: 'rising' };
-    renderDetection({ revision: 1, rule: 'The door closes', predicate: 'door open', direction: 'falling', state: null, events: 0 });`);
-  assert.equal(element('rule').value, 'The door closes');
-  assert.equal(run('session.predicate'), 'door open');
-  assert.match(element('reading').textContent, /door open.*becomes false/);
+  const p = page({ stored, answers: { ...known, 'sessions:live': live([cat]) } });
+  await p.settle();
+  assert.equal(p.run('session.id'), 's1');
+  p.push('sessions:live', live([cat]));
+  assert.equal(p.run('session.watches[0].rule'), 'cat arrives');
+  // the sweep, or Stop in another tab: nothing to stop in Convex any more
+  p.push('sessions:live', live([cat], 'stopped'));
+  assert.equal(p.run('session'), null);
+  assert.ok(!p.calls.some((c) => c[1] === 'sessions:stop'));
 });
