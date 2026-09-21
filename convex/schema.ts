@@ -5,6 +5,7 @@ export default defineSchema({
   sessions: defineTable({
     status: v.union(v.literal("active"), v.literal("stopped")),
     subscriberId: v.optional(v.id("subscribers")),
+    lastCallId: v.optional(v.string()), // the last model answer recorded: see worker:record
     // Tokens spent by this session; usdTicks is an estimate, 1 tick = 1e-10 USD.
     usage: v.object({
       prompt: v.number(),

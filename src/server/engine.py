@@ -11,6 +11,7 @@ back.
 """
 
 import asyncio
+import secrets
 import time
 from datetime import datetime, timezone
 
@@ -22,6 +23,9 @@ from src.server.cv.perception import Perception, PerceptionError
 from src.server.notifier import Notifier
 from src.server.session import Event, Feed, Watch
 from src.server.tracker import Tracker
+
+SAVE_ATTEMPTS = 3
+SAVE_BACKOFF = 1.0  # seconds, times the attempt number
 
 
 def _status(feed: Feed, gate: GateResult, sent: bool) -> dict:
@@ -140,17 +144,30 @@ async def _observe(
             w["rule"], w["predicate"], w["direction"], tracker, observation.evidence
         )
         fired.append((watch, text))
-    if fired:  # one photo per frame, shared by every event of that frame
-        storage_id = await convex.upload(jpeg)
-        for result in results:
-            if "event" in result:
-                result["event"]["storageId"] = storage_id
-    recorded = await convex.mutation(
-        "worker:record",
-        sessionId=session_id,
-        usage=detection.usage.wire(),
-        results=results,
-    )
+    # The next frame may no longer show what the model just saw, so a failed save is
+    # retried with this very answer; callId keeps a repeat from being recorded twice.
+    call_id, storage_id = secrets.token_hex(8), None
+    for attempt in range(1, SAVE_ATTEMPTS + 1):
+        try:
+            if fired and storage_id is None:
+                # one photo per frame, shared by every event of that frame
+                storage_id = await convex.upload(jpeg)
+                for result in results:
+                    if "event" in result:
+                        result["event"]["storageId"] = storage_id
+            recorded = await convex.mutation(
+                "worker:record",
+                sessionId=session_id,
+                callId=call_id,
+                usage=detection.usage.wire(),
+                results=results,
+            )
+            break
+        except ConvexError as e:
+            if attempt == SAVE_ATTEMPTS:
+                raise
+            logger.warning("session={} save failed, retrying: {}", session_id, e)
+            await asyncio.sleep(SAVE_BACKOFF * attempt)
     logger.info(
         "session={} usage +{} fired={} chat={}",
         session_id,

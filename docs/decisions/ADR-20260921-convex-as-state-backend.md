@@ -43,7 +43,9 @@ code; no Firecrawl, no AgentMail.
 3. **No second source of truth.** The worker keeps no copy of rules. It reads the watches
    from Convex before each model call (the public `sessions:live`, which already carries
    tracker state, status and the free-use deadline) and on each Telegram interaction, and
-   writes one model answer back with one mutation, `worker:record`. What stays in worker memory is only what is safe to lose: gate state,
+   writes one model answer back with one mutation, `worker:record`. A failed save is
+   retried up to three times with the same answer, because the next frame may no longer
+   show a short-lived change; a `callId` kept on the session makes the repeat harmless. What stays in worker memory is only what is safe to lose: gate state,
    per-session lock, busy/retry flags, the last frame (Telegram "snapshot" waits for a
    fresh one), and the Telegram "waiting for rule text" dialog state. That cache is keyed by
    session id, created on the first frame, and swept after 300 s idle.

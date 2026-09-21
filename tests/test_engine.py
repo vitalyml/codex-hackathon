@@ -129,3 +129,18 @@ async def test_change_while_busy_is_detected_when_model_finishes():
     await feed.task
     assert calls == [image(), image(True)]
     assert len(convex.events) == 1
+
+
+async def test_a_lost_response_is_retried_without_recording_the_answer_twice(
+    monkeypatch,
+):
+    monkeypatch.setattr("src.server.engine.SAVE_BACKOFF", 0)
+    convex = FakeConvex()
+    convex.add("s", ("arrives", "present", "rising"))
+    convex.lose_responses = 2
+    feed = Feed()
+    await handle_frame(feed, "s", image(), Answers([True]), convex, Notifier())
+    await feed.task
+    assert not feed.retry  # saved on the third attempt: no second model call needed
+    assert len(convex.events) == 1 and len(convex.usage) == 1
+    assert len(convex.photos) == 1  # the photo is uploaded once, not per attempt

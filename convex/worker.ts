@@ -21,6 +21,10 @@ export const record = mutation({
   args: {
     secret: v.string(),
     sessionId: v.id("sessions"),
+    // The worker retries a failed save with the same id, so an answer that was committed
+    // but whose response got lost is not billed and recorded twice. One field is
+    // enough: a session has one model call in flight at a time.
+    callId: v.string(),
     usage: usageValidator,
     results: v.array(
       v.object({
@@ -38,15 +42,18 @@ export const record = mutation({
     checkSecret(args.secret);
     const session = await ctx.db.get(args.sessionId);
     if (!session) return { chatId: null };
+    const repeated = session.lastCallId === args.callId;
     // Billed even if the session stopped meanwhile: the call was made.
-    await ctx.db.patch(session._id, {
-      usage: addUsage(session.usage, args.usage),
-    });
+    if (!repeated)
+      await ctx.db.patch(session._id, {
+        usage: addUsage(session.usage, args.usage),
+        lastCallId: args.callId,
+      });
     // Rules that fire on the same frame share one photo, so a photo goes only when no
     // event kept it.
     const kept = new Set<string>();
     const uploaded = new Set(args.results.flatMap((r) => r.event?.storageId ?? []));
-    for (const r of args.results) {
+    for (const r of repeated ? [] : args.results) {
       const watch = await ctx.db.get(r.watchId);
       // Dropped or edited (an edit gives the watch a new id) while the model was
       // thinking, or the session stopped: the answer is for nothing that exists.
@@ -61,8 +68,10 @@ export const record = mutation({
       });
       kept.add(r.event.storageId);
     }
-    for (const id of uploaded) if (!kept.has(id)) await ctx.storage.delete(id);
-    const fired = kept.size > 0;
+    if (!repeated)
+      for (const id of uploaded) if (!kept.has(id)) await ctx.storage.delete(id);
+    // A repeat still answers "whom to alert": the first response never arrived.
+    const fired = repeated ? uploaded.size > 0 : kept.size > 0;
     const subscriber =
       fired && session.subscriberId
         ? await ctx.db.get(session.subscriberId)

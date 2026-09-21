@@ -27,23 +27,30 @@ export const keepAlive = internalAction({
 /** Stopped sessions are kept until the hackathon ends, unless photos eat the quota:
  * then the oldest go first, one at a time, until the count is back under the limit.
  * One bounded batch per run, then it schedules itself: a session with thousands of
- * events must not hit the transaction limits. `now` is for testing. */
+ * events must not hit the transaction limits. A session once started is finished
+ * (`resume`) even if the count drops under the limit halfway: events of one frame share
+ * a photo, and a half-deleted session would keep events without theirs.
+ * `now` is for testing. */
 export const cleanup = internalMutation({
-  args: { now: v.optional(v.number()) },
+  args: { now: v.optional(v.number()), resume: v.optional(v.id("sessions")) },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const over =
-      (await ctx.db.query("events").take(MAX_EVENTS + 1)).length > MAX_EVENTS;
-    if ((args.now ?? Date.now()) < HACKATHON_END && !over) return null;
-    const session = await ctx.db
-      .query("sessions")
-      .withIndex("by_status", (q) => q.eq("status", "stopped"))
-      .first();
-    if (!session) return null;
+    let session = args.resume ? await ctx.db.get(args.resume) : null;
+    if (!session) {
+      const over =
+        (await ctx.db.query("events").take(MAX_EVENTS + 1)).length > MAX_EVENTS;
+      if ((args.now ?? Date.now()) < HACKATHON_END && !over) return null;
+      session = await ctx.db
+        .query("sessions")
+        .withIndex("by_status", (q) => q.eq("status", "stopped"))
+        .first();
+      if (!session) return null;
+    }
+    const sessionId = session._id;
     const owned = (table: "events" | "watches" | "presence") =>
       ctx.db
         .query(table)
-        .withIndex("by_session", (q) => q.eq("sessionId", session._id));
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId));
     const events = await owned("events").take(BATCH);
     for (const event of events) {
       // Events of one frame share a photo: it may be gone already.
@@ -51,13 +58,17 @@ export const cleanup = internalMutation({
         await ctx.storage.delete(event.storageId);
       await ctx.db.delete(event._id);
     }
-    if (events.length < BATCH) {
+    const done = events.length < BATCH;
+    if (done) {
       for (const table of ["watches", "presence"] as const)
         for (const row of await owned(table).collect())
           await ctx.db.delete(row._id);
-      await ctx.db.delete(session._id);
+      await ctx.db.delete(sessionId);
     }
-    await ctx.scheduler.runAfter(0, internal.crons.cleanup, args);
+    await ctx.scheduler.runAfter(0, internal.crons.cleanup, {
+      now: args.now,
+      resume: done ? undefined : sessionId,
+    });
     return null;
   },
 });
