@@ -34,7 +34,13 @@ class Bot:
 
     async def _call(self, method: str, **kwargs: Any) -> Any:
         response = await self.client.post(f"/{method}", **kwargs)
-        response.raise_for_status()
+        if response.is_error:
+            # not raise_for_status(): its message carries the URL, and the URL carries the token
+            raise httpx.HTTPStatusError(
+                f"telegram {method}: {response.status_code} {response.text[:200]}",
+                request=response.request,
+                response=response,
+            )
         return response.json()["result"]
 
     async def get_me(self) -> str:
