@@ -41,8 +41,9 @@ code; no Firecrawl, no AgentMail.
    functions. The contest's URL rule concerns the page judges open, which is served from
    convex.site; the worker is an internal service behind Convex actions.
 3. **No second source of truth.** The worker keeps no copy of rules. It reads the watches
-   from Convex before each model call and on each Telegram interaction, and writes results
-   back by mutation. What stays in worker memory is only what is safe to lose: gate state,
+   from Convex before each model call (the public `sessions:live`, which already carries
+   tracker state, status and the free-use deadline) and on each Telegram interaction, and
+   writes one model answer back with one mutation, `worker:record`. What stays in worker memory is only what is safe to lose: gate state,
    per-session lock, busy/retry flags, the last frame (Telegram "snapshot" waits for a
    fresh one), and the Telegram "waiting for rule text" dialog state. That cache is keyed by
    session id, created on the first frame, and swept after 300 s idle.
@@ -66,14 +67,19 @@ code; no Firecrawl, no AgentMail.
 
 ### Data model
 
-Tables: `sessions` (status `active|stopped`, subscriberId, usage, lastSeen), `watches`
+Tables: `sessions` (status `active|stopped`, subscriberId, usage), `watches`
 (sessionId, order, rule, predicate, direction, state, evidence), `events` (sessionId,
-watchId, text, rule, storageId), `subscribers` (token, chatId, muted, lastSeen), `presence`
-(sessionId, lastSeen; separate so heartbeats do not invalidate `sessions:live`).
+watchId, text, rule, storageId), `subscribers` (chatId, muted, lastSeen), `presence`
+(sessionId, lastSeen; separate so heartbeats do not invalidate `sessions:live`, which is
+also why `sessions` has no `lastSeen` of its own).
+
+- The subscriber token the page keeps is the subscriber's document id. Convex mutations
+  have no cryptographic random source, and every public function already rests on ids
+  being unguessable, so a separate token field would add nothing.
 
 - Events are identified by document id; the number shown in the UI is the list index.
 - Editing a rule is delete-and-insert at the same `order`, so the watch gets a new id and a
-  model answer that was in flight for the old rule is ignored by `events:record`.
+  model answer that was in flight for the old rule is ignored by `worker:record`.
 - Telegram sees only `active` sessions (index `by_subscriber` on `[subscriberId, status]`).
 - A heartbeat never revives a stopped session.
 - `events:list` returns the latest 50. `subscribers:*` expose `linked: boolean`, never the
@@ -154,12 +160,13 @@ watchId, text, rule, storageId), `subscribers` (token, chatId, muted, lastSeen),
   could lock the demo for the judges.
 - Mandatory Telegram sign-up before use: a judge without Telegram would see a gate instead
   of the product.
-- Collapsing the per-watch mutations into one: a performance gain only; each mutation is
-  already atomic, so not worth the risk before the deadline.
+- Per-watch result mutations: considered while the plan assumed porting existing
+  per-watch code. Nothing was written yet, so `worker:record` takes the whole model
+  answer: one transaction, and fewer function calls against the free-tier budget.
 
 ## Files Modified
 
-Done on branch `convex` (4 local commits, nothing pushed):
+Done on branch `convex` (local commits, nothing pushed to git):
 
 - `.claude/skills/convex-hackathon-skill/SKILL.md`, `references/log-format.md` (created)
 - `hackathon.md` (created)
@@ -174,8 +181,11 @@ Done on branch `convex` (4 local commits, nothing pushed):
 - `tests/test_perception.py`, `tests/test_app.py` (modified)
 - `docs/decisions/ADR-20260921-convex-as-state-backend.md` (this file)
 
-Still to come: `convex/schema.ts` and the function modules (`sessions`, `watches`,
-`events`, `subscribers`, `worker`, `presence`, `crons`, `lib`), `src/server/convex_client.py`,
+- `convex/schema.ts`, `convex/lib.ts`, `convex/sessions.ts`, `convex/presence.ts`,
+  `convex/watches.ts`, `convex/events.ts`, `convex/worker.ts`, `convex/subscribers.ts`,
+  `convex/crons.ts` (created; checked against the dev deployment with `npx convex run`)
+
+Still to come: the Telegram functions in `convex/worker.ts`, `src/server/convex_client.py`,
 and the rewrites of `src/server/engine.py`, `src/server/session.py`,
 `src/server/telegram/notifier.py`, `static/app.js`, the affected tests, and `README.md`.
 
@@ -197,8 +207,8 @@ and the rewrites of `src/server/engine.py`, `src/server/session.py`,
 
 - Two deploy targets and three sets of environment variables (Convex, worker, page build)
   instead of one service.
-- Each model call adds two network round trips to Convex, and the per-watch writes are not
-  one transaction.
+- Each model call adds two network round trips to Convex (three when an event photo is
+  uploaded). A photo uploaded for a `record` that never happens is orphaned in storage.
 - The 10-minute limit and all public functions rest on unguessable ids; without accounts
   any limit can be reset by clearing browser storage.
 - The cost counter becomes an estimate, and each model call costs about four times more.
@@ -213,11 +223,11 @@ and the rewrites of `src/server/engine.py`, `src/server/session.py`,
 1. **Where the worker runs for the submission.** The existing Render service belongs to a
    teammate and is currently suspended. Options: the teammate resumes it and sets the
    secrets, or the owner creates their own Render service from the same repository.
-2. **Automatic pushes to the Convex dev deployment.** The Convex agent plugin's end-of-turn
-   hook runs `convex dev --once` whenever `convex/` has uncommitted changes; it already
-   registered the static-hosting component on the dev deployment (no site files, no
-   functions, no data). Either accept dev-deployment pushes as the normal Convex workflow or
-   disable the plugin for this project.
+2. ~~Automatic pushes to the Convex dev deployment.~~ Decided 2026-09-21: pushes of
+   `convex/` code to the dev deployment are the normal workflow and need no approval
+   (no data or users there, and functions cannot be checked any other way). Git pushes,
+   the production deployment, the static-site upload and secrets still need the owner's
+   explicit go-ahead.
 3. **The `gpt-4o` check on real frames** (`scripts/vision_check.py`: 3 of 3 frames, 5 of 5
    cases, median latency near 2 s, and whether image `detail: low` passes) waits for an
    OpenAI API key. `README.md` cost figures are rewritten after it.
