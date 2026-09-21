@@ -1,7 +1,7 @@
 # ADR-20260921: Make Convex the State Backend, Keep the Python Worker for Vision
 
-Status: accepted 2026-09-21. Implementation in progress on branch `convex`; section
-"Open" lists what is not decided yet.
+Status: accepted 2026-09-21. Implementation in progress on branch `convex`. Nothing in
+section "Open" is undecided any more; what is left is work, listed under "Still to come".
 
 ## Context
 
@@ -245,9 +245,12 @@ and the rewrites of `src/server/engine.py`, `src/server/session.py`,
 
 ## Open
 
-1. **Where the worker runs for the submission.** The existing Render service belongs to a
-   teammate and is currently suspended. Options: the teammate resumes it and sets the
-   secrets, or the owner creates their own Render service from the same repository.
+1. ~~Where the worker runs for the submission.~~ Decided 2026-09-21: the owner creates
+   a new Render service from this repository in region `virginia` (decision 24). The
+   teammate's suspended service is not used: its region cannot be changed, and the
+   measured gain is a model call in about 1.3 s instead of 1.9 s and an event in about
+   1.6 s instead of 3.8 s. The production configuration is: gpt-4o with image
+   `detail: low`, the worker in `virginia`, Convex in US East.
 2. ~~Automatic pushes to the Convex dev deployment.~~ Decided 2026-09-21: pushes of
    `convex/` code to the dev deployment are the normal workflow and need no approval
    (no data or users there, and functions cannot be checked any other way). Git pushes,
