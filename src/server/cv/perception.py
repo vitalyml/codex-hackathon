@@ -79,6 +79,15 @@ class Usage:
     def usd(self) -> float:
         return self.usd_ticks / 10_000_000_000
 
+    def wire(self) -> dict:
+        """The shape Convex stores (convex/lib.ts usageValidator)."""
+        return {
+            "prompt": self.prompt,
+            "completion": self.completion,
+            "calls": self.calls,
+            "usdTicks": self.usd_ticks,
+        }
+
     def as_dict(self) -> dict:
         return {
             "prompt": self.prompt,

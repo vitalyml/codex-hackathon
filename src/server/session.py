@@ -1,4 +1,8 @@
-"""In-memory sessions: one gate + N watches (one tracker each) per browser tab, capped, expiring on silence."""
+"""What the worker keeps in memory.
+
+`Feed`/`Feeds` is the real thing: per-session state that is safe to lose, because
+everything durable lives in Convex. The classes below them are the old in-memory store,
+kept only until the Telegram module moves to Convex."""
 
 import asyncio
 import secrets
@@ -11,6 +15,57 @@ from loguru import logger
 from src.server.cv.gate import Gate
 from src.server.cv.perception import Rule, Usage
 from src.server.tracker import Tracker
+
+FEED_TTL = 300.0  # seconds without a frame before a feed is forgotten
+
+
+@dataclass
+class Feed:
+    """The frame stream of one session. Lost on a restart, rebuilt by the next frame."""
+
+    gate: Gate = field(default_factory=Gate)
+    busy: bool = False  # a model call is in flight
+    retry: bool = False  # ask the model on the next frame even if the scene is quiet
+    closed: bool = False  # Convex said: stopped, gone, or past the free limit
+    latest_frame: bytes = b""  # Telegram "snapshot" waits for a fresh one
+    frame_at: str = ""
+    frame_received: asyncio.Event = field(default_factory=asyncio.Event)
+    last_seen: float = field(default_factory=time.monotonic)
+    lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock
+    )  # frames of one tab, in order
+    task: Optional["asyncio.Task[None]"] = None  # keeps the background model call alive
+    notifications: set[asyncio.Task] = field(default_factory=set)
+
+
+class Feeds:
+    def __init__(self, ttl: float = FEED_TTL) -> None:
+        self.ttl = ttl
+        self._feeds: dict[str, Feed] = {}
+
+    def __len__(self) -> int:
+        return len(self._feeds)
+
+    def get(self, session_id: str) -> Optional[Feed]:
+        feed = self._feeds.get(session_id)
+        if feed is not None:
+            feed.last_seen = time.monotonic()
+        return feed
+
+    def add(self, session_id: str) -> Feed:
+        return self._feeds.setdefault(session_id, Feed())
+
+    def all(self) -> list[Feed]:
+        return list(self._feeds.values())
+
+    def sweep(self, now: float | None = None) -> int:
+        now = time.monotonic() if now is None else now
+        dead = [k for k, f in self._feeds.items() if now - f.last_seen > self.ttl]
+        for k in dead:
+            feed = self._feeds.pop(k)
+            if feed.task is not None:
+                feed.task.cancel()
+        return len(dead)
 
 
 class SessionFull(Exception):
