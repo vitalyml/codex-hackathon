@@ -161,10 +161,11 @@ also why `sessions` has no `lastSeen` of its own).
     (`TELEGRAM_BOT_TOKEN` empty) if time runs out.
 24. **The worker runs in Render region `virginia`**, next to Convex (US East) and the
     OpenAI API. Measured from Belgrade, Convex adds 0.45 s to a model call (0.20 s to
-    read the watches, 0.25 s to record) and 1.9 s to upload an event photo; with the
-    worker in the same region these are expected to drop to about 0.1 s and 0.3 s, which
-    brings a call back to the ~1.3 s it took before the migration. To be measured after
-    the first deploy. A Render region is fixed when the service is created, which
+    read the watches, 0.25 s to record) and 1.9 s to upload an event photo. Measured from
+    inside US East (a temporary Convex action calling the same HTTP API): 0.027 s to
+    read, 0.034 s to record, 0.24 s to upload, and 0.06 s instead of 0.35 s to reach the
+    OpenAI API. That brings a call back to about 1.3 s, what it took before the
+    migration, and an event to about 1.6 s instead of 3.8 s. A Render region is fixed when the service is created, which
     settles open question 1 in favour of a new service. Moving Convex to EU West was
     rejected: it speeds up European users only, costs 1.3x and needs a new deployment.
 25. **Development:** the Convex dev deployment reaches a local worker through a
