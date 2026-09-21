@@ -36,5 +36,6 @@ CONVEX_URL = os.getenv("CONVEX_URL", "")  # https://<deployment>.convex.cloud
 # functions there and /internal/* here.
 WORKER_SECRET = os.getenv("WORKER_SECRET", "")
 # Where the page lives when it is not served by this app (Convex static hosting);
-# that origin is allowed to call the API. Empty: same-origin only.
-FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "")
+# that origin is allowed to call the API. Empty: same-origin only. A browser sends Origin
+# without a trailing slash, and CORS compares the strings exactly.
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "").rstrip("/")

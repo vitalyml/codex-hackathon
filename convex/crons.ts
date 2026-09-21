@@ -2,6 +2,7 @@ import { cronJobs } from "convex/server";
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { internalAction, internalMutation } from "./_generated/server";
+import { workerUrl } from "./lib";
 
 const HACKATHON_END = Date.UTC(2026, 8, 25, 12); // 2026-09-25 12:00 UTC
 const BATCH = 500; // events deleted per cleanup run
@@ -13,9 +14,9 @@ export const keepAlive = internalAction({
   args: {},
   returns: v.null(),
   handler: async () => {
-    if (!process.env.WORKER_URL) return null;
+    if (!workerUrl()) return null;
     try {
-      const res = await fetch(`${process.env.WORKER_URL}/health`);
+      const res = await fetch(`${workerUrl()}/health`);
       if (!res.ok) console.warn(`worker /health: HTTP ${res.status}`);
     } catch (e) {
       console.warn(`worker /health: ${e}`);

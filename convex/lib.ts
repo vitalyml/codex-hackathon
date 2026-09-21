@@ -58,13 +58,16 @@ export type Spec = {
 
 export type Failure = { error: string; hint?: string };
 
+/** Every path here starts with "/", and "//health" is a 404 on the worker. */
+export const workerUrl = () => (process.env.WORKER_URL ?? "").replace(/\/+$/, "");
+
 /** Rule normalization stays in Python: ask the worker. On the free Render plan it may be
  * asleep and takes about a minute to wake, so that is reported, not waited out. */
 export async function normalize(rules: string[]): Promise<Spec[] | Failure> {
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), 20_000);
   try {
-    const res = await fetch(`${process.env.WORKER_URL}/internal/normalize`, {
+    const res = await fetch(`${workerUrl()}/internal/normalize`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
