@@ -1,17 +1,17 @@
 import httpx
 import pytest
 
-from src.server.cv.perception import GrokPerception, PerceptionError
+from src.server.cv.perception import OpenAIPerception, PerceptionError
 
 
 def reply(content: str) -> httpx.Response:
     return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
 
 
-def make(handler) -> GrokPerception:
-    p = GrokPerception(keys=["A", "B"], model="m")
+def make(handler) -> OpenAIPerception:
+    p = OpenAIPerception(keys=["A", "B"], model="m")
     p.client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://api.x.ai/v1"
+        transport=httpx.MockTransport(handler), base_url="https://api.openai.com/v1"
     )
     return p
 
@@ -90,16 +90,20 @@ async def test_failover_sticks_to_backup_key():
     assert seen == ["A", "B", "B"]
 
 
-async def test_usage_is_read_from_response():
+async def test_usage_is_priced_from_tokens(monkeypatch):
+    monkeypatch.setattr("src.server.cv.perception.OPENAI_PRICE_IN", 2.5)
+    monkeypatch.setattr("src.server.cv.perception.OPENAI_PRICE_CACHED", 1.25)
+    monkeypatch.setattr("src.server.cv.perception.OPENAI_PRICE_OUT", 10.0)
+
     async def handler(request):
         return httpx.Response(
             200,
             json={
                 "choices": [{"message": {"content": '{"state_now": false}'}}],
                 "usage": {
-                    "prompt_tokens": 300,
+                    "prompt_tokens": 300,  # includes the cached ones
                     "completion_tokens": 12,
-                    "cost_in_usd_ticks": 4456000,
+                    "prompt_tokens_details": {"cached_tokens": 100},
                 },
             },
         )
@@ -110,14 +114,15 @@ async def test_usage_is_read_from_response():
         "completion": 12,
         "total": 312,
         "calls": 1,
-        "usd": 0.000446,  # ticks are 1e-10 USD, as billed by xAI
+        # (200 * 2.50 + 100 * 1.25 + 12 * 10.00) / 1M
+        "usd": 0.000745,
     }
 
 
 async def test_slow_key_fails_over_without_waiting_thirty_seconds(monkeypatch):
     import asyncio
 
-    monkeypatch.setattr("src.server.cv.perception.XAI_ATTEMPT_TIMEOUT", 0.01)
+    monkeypatch.setattr("src.server.cv.perception.OPENAI_ATTEMPT_TIMEOUT", 0.01)
     seen = []
 
     async def handler(request):
@@ -138,8 +143,8 @@ async def test_slow_key_fails_over_without_waiting_thirty_seconds(monkeypatch):
 async def test_total_deadline_bounds_all_key_attempts(monkeypatch):
     import asyncio
 
-    monkeypatch.setattr("src.server.cv.perception.XAI_REQUEST_TIMEOUT", 0.02)
-    monkeypatch.setattr("src.server.cv.perception.XAI_ATTEMPT_TIMEOUT", 1)
+    monkeypatch.setattr("src.server.cv.perception.OPENAI_REQUEST_TIMEOUT", 0.02)
+    monkeypatch.setattr("src.server.cv.perception.OPENAI_ATTEMPT_TIMEOUT", 1)
     cancelled = asyncio.Event()
 
     async def handler(request):

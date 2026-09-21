@@ -14,7 +14,12 @@ from loguru import logger
 from pydantic import BaseModel
 
 from src import config
-from src.server.cv.perception import GrokPerception, Perception, PerceptionError, Usage
+from src.server.cv.perception import (
+    OpenAIPerception,
+    Perception,
+    PerceptionError,
+    Usage,
+)
 from src.server.engine import detection_status, handle_frame, watch_status
 from src.server.notifier import Notifier
 from src.server.session import (
@@ -332,7 +337,7 @@ def create_app(
 
 
 def default_app() -> FastAPI:
-    perception = GrokPerception(config.XAI_API_KEYS, config.XAI_MODEL)
+    perception = OpenAIPerception(config.OPENAI_API_KEYS, config.OPENAI_MODEL)
     store = SessionStore(config.MAX_SESSIONS, config.SESSION_TTL)
     subs = Subscribers(config.MAX_SUBSCRIBERS, config.SUBSCRIBER_TTL)
     if not config.TELEGRAM_BOT_TOKEN:

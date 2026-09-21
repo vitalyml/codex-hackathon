@@ -1,4 +1,7 @@
-"""3-frame / 5-case check of a Grok vision model on data/*.png. Usage: poetry run python scripts/grok_check.py [model]"""
+"""3-frame / 5-case check of a vision model on data/*.png.
+
+Usage: poetry run python scripts/vision_check.py [model] [detail]   (detail: auto | low | high)
+"""
 
 import base64
 import json
@@ -12,11 +15,12 @@ import httpx
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.config import XAI_API_KEYS, XAI_MODEL  # noqa: E402
+from src.config import OPENAI_API_KEYS, OPENAI_BASE_URL, OPENAI_MODEL  # noqa: E402
 
 DATA = Path(__file__).resolve().parents[1] / "data"
-MODEL = sys.argv[1] if len(sys.argv) > 1 else XAI_MODEL
-URL = "https://api.x.ai/v1/chat/completions"
+MODEL = sys.argv[1] if len(sys.argv) > 1 else OPENAI_MODEL
+DETAIL = sys.argv[2] if len(sys.argv) > 2 else "auto"
+URL = f"{OPENAI_BASE_URL}/chat/completions"
 PREDICATE = "a cat is on the table (a cat on a chair or on the floor does not count)"
 TRUTH = {"1.png": False, "2.png": False, "3.png": True}
 CASES = [
@@ -58,7 +62,8 @@ def ask(name: str) -> dict:
                         "type": "image_url",
                         "image_url": {
                             "url": "data:image/jpeg;base64,"
-                            + base64.b64encode(jpeg(name)).decode()
+                            + base64.b64encode(jpeg(name)).decode(),
+                            "detail": DETAIL,
                         },
                     },
                 ],
@@ -68,7 +73,7 @@ def ask(name: str) -> dict:
     started = perf_counter()
     response = httpx.post(
         URL,
-        headers={"Authorization": f"Bearer {XAI_API_KEYS[0]}"},
+        headers={"Authorization": f"Bearer {OPENAI_API_KEYS[0]}"},
         json=payload,
         timeout=60,
     )
@@ -88,12 +93,13 @@ def ask(name: str) -> dict:
         "evidence": evidence,
         "seconds": round(perf_counter() - started, 2),
         "tokens": body.get("usage", {}).get("prompt_tokens"),
+        "usage": body.get("usage", {}),
     }
 
 
 def main() -> int:
-    assert XAI_API_KEYS, "XAI_API_KEYS is empty"
-    print(f"model {MODEL}\n")
+    assert OPENAI_API_KEYS, "OPENAI_API_KEYS is empty"
+    print(f"model {MODEL} detail={DETAIL}\n")
     state = {}
     for name in TRUTH:
         r = ask(name)
@@ -102,6 +108,7 @@ def main() -> int:
         print(
             f"{ok} {name}: state={r['state']} ({r['seconds']}s, {r['tokens']} tok) — {r['evidence']}"
         )
+        print(f"    usage: {r['usage']}")
     frames = sum(state[n] == TRUTH[n] for n in TRUTH)
     cases = sum(((not state[a]) and state[b]) == expected for a, b, expected in CASES)
     print(f"\nframes {frames}/3 · cases {cases}/5")

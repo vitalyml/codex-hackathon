@@ -1,6 +1,6 @@
-"""One call per frame to a vision model: every watch's predicate in one prompt. Port of notebooks/groq.ipynb, pointed at xAI.
+"""One call per frame to a vision model: every watch's predicate in one prompt. Port of notebooks/groq.ipynb, pointed at OpenAI.
 
-Integration seam: depend on the `Perception` protocol, not on `GrokPerception`.
+Integration seam: depend on the `Perception` protocol, not on `OpenAIPerception`.
 Tests inject a fake; the provider can be swapped without touching callers.
 """
 
@@ -14,9 +14,14 @@ from typing import Any, Optional, Protocol
 import httpx
 from loguru import logger
 
-from src.config import XAI_ATTEMPT_TIMEOUT, XAI_REQUEST_TIMEOUT
-
-BASE_URL = "https://api.x.ai/v1"
+from src.config import (
+    OPENAI_ATTEMPT_TIMEOUT,
+    OPENAI_BASE_URL,
+    OPENAI_PRICE_CACHED,
+    OPENAI_PRICE_IN,
+    OPENAI_PRICE_OUT,
+    OPENAI_REQUEST_TIMEOUT,
+)
 
 DETECT_PROMPT = (
     "You look at a single still frame from a fixed security camera.\n"
@@ -51,11 +56,11 @@ class PerceptionError(Exception):
 
 @dataclass
 class Usage:
-    """Tokens and money billed by the API. Mutable accumulator: `total += call`.
+    """Tokens spent and what they cost. Mutable accumulator: `total += call`.
 
-    Cost comes from the response's `cost_in_usd_ticks` (1 tick = 1e-10 USD), so it
-    already reflects the model's real price list, cached-prompt discounts and image
-    tokens. No local price table to drift.
+    The API reports tokens, not money, so cost is an estimate: tokens times the
+    per-million prices in config (1 tick = 1e-10 USD). `prompt_tokens` already counts
+    image tokens and cached ones; cached tokens are billed at their own rate.
     """
 
     prompt: int = 0
@@ -118,6 +123,19 @@ class Perception(Protocol):
     async def detect(self, jpeg: bytes, predicates: list[str]) -> Detection: ...
 
 
+def _usage(u: dict) -> Usage:
+    prompt = int(u.get("prompt_tokens", 0))
+    completion = int(u.get("completion_tokens", 0))
+    cached = int((u.get("prompt_tokens_details") or {}).get("cached_tokens", 0))
+    # $1 per 1M tokens = 1e-6 USD per token = 1e4 ticks
+    ticks = (
+        (prompt - cached) * OPENAI_PRICE_IN
+        + cached * OPENAI_PRICE_CACHED
+        + completion * OPENAI_PRICE_OUT
+    ) * 10_000
+    return Usage(prompt, completion, 1, round(ticks))
+
+
 def _json(raw: str) -> dict:
     try:
         data = json.loads(raw)
@@ -132,14 +150,14 @@ def _json(raw: str) -> dict:
         return {}
 
 
-class GrokPerception:
+class OpenAIPerception:
     def __init__(self, keys: list[str], model: str) -> None:
         if not keys:
-            raise PerceptionError("no XAI_API_KEYS configured")
+            raise PerceptionError("no OPENAI_API_KEYS configured")
         self.model = model
         self._keys = keys
         self._active = 0  # sticky: the first key is primary, later ones are fallbacks
-        self.client = httpx.AsyncClient(base_url=BASE_URL, timeout=30)
+        self.client = httpx.AsyncClient(base_url=OPENAI_BASE_URL, timeout=30)
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -147,10 +165,10 @@ class GrokPerception:
     async def _ask(self, content: Any, max_tokens: int = 96) -> tuple[str, Usage]:
         try:
             return await asyncio.wait_for(
-                self._ask_with_failover(content, max_tokens), XAI_REQUEST_TIMEOUT
+                self._ask_with_failover(content, max_tokens), OPENAI_REQUEST_TIMEOUT
             )
         except asyncio.TimeoutError as e:
-            raise PerceptionError("xAI request deadline exceeded") from e
+            raise PerceptionError("OpenAI request deadline exceeded") from e
 
     async def _ask_with_failover(
         self, content: Any, max_tokens: int
@@ -171,23 +189,17 @@ class GrokPerception:
                         json=payload,
                         headers={"Authorization": f"Bearer {key}"},
                     ),
-                    XAI_ATTEMPT_TIMEOUT,
+                    OPENAI_ATTEMPT_TIMEOUT,
                 )
                 if response.status_code in (429, 500, 502, 503):
                     last = PerceptionError(
-                        f"xai {response.status_code}: {response.text[:120]}"
+                        f"openai {response.status_code}: {response.text[:120]}"
                     )
                     self._failover(last)
                     continue
                 response.raise_for_status()
                 body = response.json()
-                u = body.get("usage") or {}
-                usage = Usage(
-                    int(u.get("prompt_tokens", 0)),
-                    int(u.get("completion_tokens", 0)),
-                    1,
-                    int(u.get("cost_in_usd_ticks", 0)),
-                )
+                usage = _usage(body.get("usage") or {})
                 return body["choices"][0]["message"].get("content") or "", usage
             except (httpx.HTTPError, asyncio.TimeoutError) as e:
                 last = e
@@ -196,11 +208,11 @@ class GrokPerception:
 
     def _failover(self, error: Exception) -> None:
         if len(self._keys) == 1:
-            logger.warning("xai key failed: {!r}", error)
+            logger.warning("openai key failed: {!r}", error)
             return
         self._active = (self._active + 1) % len(self._keys)
         logger.warning(
-            "xai key failed: {!r}; switching to key #{}", error, self._active + 1
+            "openai key failed: {!r}; switching to key #{}", error, self._active + 1
         )
 
     async def normalize(self, rule: str) -> Rule:

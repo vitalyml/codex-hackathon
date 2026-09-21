@@ -13,10 +13,10 @@ services:
         value: "true"
       - key: LOG_LEVEL
         value: INFO
-      - key: XAI_API_KEYS
+      - key: OPENAI_API_KEYS
         sync: false
-      - key: XAI_MODEL
-        value: grok-4.20-0309-non-reasoning
+      - key: OPENAI_MODEL
+        value: gpt-4o
       - key: MAX_SESSIONS
         value: "10"
       - key: SESSION_TTL

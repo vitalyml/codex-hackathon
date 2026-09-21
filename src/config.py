@@ -11,12 +11,18 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-XAI_API_KEYS = [
-    k.strip() for k in os.getenv("XAI_API_KEYS", "").split(",") if k.strip()
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+OPENAI_API_KEYS = [
+    k.strip() for k in os.getenv("OPENAI_API_KEYS", "").split(",") if k.strip()
 ]
-XAI_MODEL = os.getenv("XAI_MODEL", "grok-4.20-0309-non-reasoning")
-XAI_REQUEST_TIMEOUT = float(os.getenv("XAI_REQUEST_TIMEOUT", "10"))
-XAI_ATTEMPT_TIMEOUT = float(os.getenv("XAI_ATTEMPT_TIMEOUT", "5"))
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+OPENAI_REQUEST_TIMEOUT = float(os.getenv("OPENAI_REQUEST_TIMEOUT", "10"))
+OPENAI_ATTEMPT_TIMEOUT = float(os.getenv("OPENAI_ATTEMPT_TIMEOUT", "5"))
+# USD per 1M tokens. The API reports tokens, not money, so the page's cost counter is
+# an estimate from these prices - keep them in step with the model above.
+OPENAI_PRICE_IN = float(os.getenv("OPENAI_PRICE_IN", "2.50"))
+OPENAI_PRICE_CACHED = float(os.getenv("OPENAI_PRICE_CACHED", "1.25"))
+OPENAI_PRICE_OUT = float(os.getenv("OPENAI_PRICE_OUT", "10.00"))
 MAX_SESSIONS = int(os.getenv("MAX_SESSIONS", "10"))
 SESSION_TTL = float(os.getenv("SESSION_TTL", "30"))
 MAX_WATCHES = int(os.getenv("MAX_WATCHES", "5"))  # rules per session
