@@ -84,6 +84,7 @@ body.flash { animation: flash .7s ease-out; }
 
 /* ---------- stage ---------- */
 .workspace { margin-top: 16px; }
+.workspace + .primer { margin-top: 16px; }
 .stage { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
          overflow: hidden; box-shadow: var(--shadow); }
 .viewfinder { position: relative; background: #000; aspect-ratio: 16 / 9; }

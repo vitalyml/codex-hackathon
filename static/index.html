@@ -31,18 +31,6 @@
     </details>
   </header>
 
-  <details class="primer">
-    <summary>Encrypted history &amp; recovery key</summary>
-    <p class="note">Your key stays in this browser after you close it. Download a backup before clearing browser data or switching devices. Anyone with the recovery file can read your saved sessions. Telegram alerts, when enabled, contain readable text.</p>
-    <div class="row">
-      <button id="exportKey" type="button" class="secondary">Download key</button>
-      <button id="importKey" type="button" class="secondary">Import key</button>
-      <input id="keyFile" type="file" accept="application/json,.json" hidden>
-    </div>
-    <label for="historyList">Saved sessions</label>
-    <select id="historyList"><option value="">Choose a saved session</option></select>
-  </details>
-
   <div class="workspace">
   <section class="stage">
     <div class="viewfinder">
@@ -94,6 +82,18 @@
     <ol id="events" class="events" tabindex="0" aria-live="polite" aria-label="Detected events, newest first"></ol>
   </section>
   </div>
+
+  <details class="primer">
+    <summary>Encrypted history &amp; recovery key</summary>
+    <p class="note">Your key stays in this browser after you close it. Download a backup before clearing browser data or switching devices. Anyone with the recovery file can read your saved sessions. Telegram alerts, when enabled, contain readable text.</p>
+    <div class="row">
+      <button id="exportKey" type="button" class="secondary">Download key</button>
+      <button id="importKey" type="button" class="secondary">Import key</button>
+      <input id="keyFile" type="file" accept="application/json,.json" hidden>
+    </div>
+    <label for="historyList">Saved sessions</label>
+    <select id="historyList"><option value="">Choose a saved session</option></select>
+  </details>
 </main>
 
 <dialog id="shotDialog" class="shot-dialog" aria-labelledby="shotCaption">
