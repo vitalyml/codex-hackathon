@@ -116,17 +116,6 @@ async def create(body: NewSession):
     rule = body.rule.strip().lower()
     if rule == "full":
         return JSONResponse({"error": "full"}, status_code=503)
-    if not any(
-        w in rule
-        for w in ("jump", "leave", "arrive", "appear", "enter", "go", "happen", "come")
-    ):
-        return JSONResponse(
-            {
-                "error": "not_a_transition",
-                "hint": "describe something that happens — e.g. 'the cat jumps onto the table'",
-            },
-            status_code=400,
-        )
     sid = f"mock{len(sessions) + 1}"
     direction = "falling" if "leave" in rule or "go" in rule else "rising"
     sessions[sid] = {

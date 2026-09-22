@@ -374,27 +374,23 @@ async def _enter_rule(tg: Telegram, chat_id: int, text: str, mode: str) -> Reply
         )
     # One mutation bills the call and changes the rules, and refuses if the session
     # stopped, the limit is reached or the edited rule is gone meanwhile.
-    args: dict = {"sessionId": session["id"], "usage": spec.usage.wire()}
-    if spec.is_transition:
-        args["watch"] = {
+    args: dict = {
+        "sessionId": session["id"],
+        "usage": spec.usage.wire(),
+        "watch": {
             "rule": rule,
             "predicate": spec.predicate,
             "direction": spec.direction,
-        }
-        if mode != "add":
-            args["replaces"] = mode.partition(":")[2]
+        },
+    }
+    if mode != "add":
+        args["replaces"] = mode.partition(":")[2]
     failed = await tg.convex.mutation("worker:putWatch", **args)
     if failed and failed["error"] == "no_session":
         return Reply(
             chat_id,
             "⌛ Your camera session changed. Open the dashboard and try again.",
             BACK,
-        )
-    if not spec.is_transition:
-        return Reply(
-            chat_id,
-            "✏️ <b>Describe something that changes</b>\nTry: <i>Someone enters the room</i>.\nYour rules are unchanged.",
-            [[("Cancel", "rules")]],
         )
     tg.editing.pop(chat_id, None)
     if failed:

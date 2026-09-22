@@ -68,18 +68,11 @@ export const add = action({
     const specs = await normalize([rule]);
     if ("error" in specs) return specs;
     const [spec] = specs;
-    const failed = await ctx.runMutation(internal.watches.insert, {
+    return await ctx.runMutation(internal.watches.insert, {
       sessionId: args.sessionId,
       usage: spec.usage,
-      watch: spec.isTransition
-        ? { rule, predicate: spec.predicate, direction: spec.direction }
-        : undefined,
+      watch: { rule, predicate: spec.predicate, direction: spec.direction },
     });
-    if (failed || spec.isTransition) return failed;
-    return {
-      error: "not_a_transition",
-      hint: "describe something that happens - e.g. 'the cat jumps onto the table'",
-    };
   },
 });
 

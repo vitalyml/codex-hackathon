@@ -38,7 +38,6 @@ export function checkSecret(secret: string): void {
 export type Spec = {
   predicate: string;
   direction: "rising" | "falling";
-  isTransition: boolean;
   usage: Usage;
 };
 

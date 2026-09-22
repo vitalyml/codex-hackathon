@@ -73,8 +73,6 @@ class FakeConvex:
             watches[:] = [w for w in watches if w["id"] != args["watchId"]]
         elif path == "worker:putWatch":
             self.billed += 1
-            if "watch" not in args:
-                return None
             watches = self.session["watches"]
             if "replaces" in args:
                 i = next(
@@ -201,7 +199,7 @@ async def test_notify_sends_photo_only_to_the_chat_record_named():
 
 async def test_rules_add_edit_drop_and_rejected_rules():
     perception = AsyncMock()
-    perception.normalize.return_value = Rule("door open", "rising", True)
+    perception.normalize.return_value = Rule("door open", "rising")
     tg, convex = connected(perception=perception)
     feed = tg.feeds.add(SESSION)
     r = await handle(tg, press("rules"))
@@ -223,18 +221,16 @@ async def test_rules_add_edit_drop_and_rejected_rules():
     await handle(tg, press("drop:w2"))
     assert rules(convex) == ["Cat leaves"]
     assert "Keep at least one" in (await handle(tg, press("drop:w3"))).text
-    # Not a change, then the model is down: billed once, rules kept, entry stays open.
-    perception.normalize.return_value = Rule("cat", "rising", False)
+    # The model is down: nothing billed, rules kept, entry stays open.
     await handle(tg, press("add"))
-    await respond(tg, msg("cat"))
     perception.normalize.side_effect = PerceptionError("unavailable")
     await respond(tg, msg("door opens"))
     assert rules(convex) == ["Cat leaves"] and tg.editing[42] == "add"
-    assert convex.billed == 3
+    assert convex.billed == 2
     # Navigating away cancels rule entry: the next message is just chatter.
     await handle(tg, press("events"))
     await respond(tg, msg("door opens"))
-    assert 42 not in tg.editing and perception.normalize.await_count == 4
+    assert 42 not in tg.editing and perception.normalize.await_count == 3
 
 
 async def test_snapshot_waits_for_a_fresh_frame_and_never_sends_a_stale_one(

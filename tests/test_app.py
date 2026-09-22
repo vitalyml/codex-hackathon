@@ -18,8 +18,8 @@ class FakePerception:
 
     async def normalize(self, rule: str) -> Rule:
         if rule == "a cat":
-            return Rule("a cat is visible", "rising", False)
-        return Rule("a cat is on the table", "rising", True, Usage(120, 8, 1, 4500))
+            return Rule("a cat is visible", "rising")
+        return Rule("a cat is on the table", "rising", Usage(120, 8, 1, 4500))
 
     async def detect(self, jpeg: bytes, predicates: list[str]) -> Detection:
         self.calls += 1
@@ -78,13 +78,11 @@ def test_normalize_is_for_convex_only(monkeypatch):
         {
             "predicate": "a cat is on the table",
             "direction": "rising",
-            "isTransition": True,
             "usage": {"prompt": 120, "completion": 8, "calls": 1, "usdTicks": 4500},
         },
         {
             "predicate": "a cat is visible",
             "direction": "rising",
-            "isTransition": False,
             "usage": {"prompt": 0, "completion": 0, "calls": 0, "usdTicks": 0},
         },
     ]

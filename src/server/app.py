@@ -124,7 +124,6 @@ def create_app(
                 {
                     "predicate": s.predicate,
                     "direction": s.direction,
-                    "isTransition": s.is_transition,
                     "usage": s.usage.wire(),
                 }
                 for s in specs

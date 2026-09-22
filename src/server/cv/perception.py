@@ -44,10 +44,9 @@ NORMALIZE_PROMPT = (
     "- direction: 'rising' if the user waits for the predicate to become true "
     "(appears, arrives, jumps on, turns on), 'falling' if they wait for it to "
     "become false (leaves, goes away, turns off)\n"
-    "- is_transition: false if the words describe no change at all "
-    "(just an object or a scene)\n"
-    'Reply with JSON only: {{"predicate": "...", '
-    '"direction": "rising"|"falling", "is_transition": true|false}}'
+    "A bare object ('an apple', 'tell me if you see a dog') means waiting for it "
+    "to appear: rising\n"
+    'Reply with JSON only: {{"predicate": "...", "direction": "rising"|"falling"}}'
 )
 
 
@@ -109,7 +108,6 @@ class Usage:
 class Rule:
     predicate: str
     direction: str  # rising | falling
-    is_transition: bool
     usage: Usage = field(default_factory=Usage)
 
 
@@ -234,7 +232,6 @@ class OpenAIPerception:
         return Rule(
             str(data["predicate"]),
             direction,
-            bool(data.get("is_transition", True)),
             usage,
         )
 

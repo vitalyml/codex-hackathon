@@ -28,12 +28,6 @@ export const start = action({
       };
     const specs = await normalize(rules);
     if ("error" in specs) return specs;
-    const vague = specs.findIndex((s) => !s.isTransition);
-    if (vague >= 0)
-      return {
-        error: "not_a_transition",
-        hint: `'${rules[vague]}': describe something that happens - e.g. 'the cat jumps onto the table'`,
-      };
     return await ctx.runMutation(internal.sessions.create, {
       watches: specs.map((s, i) => ({
         rule: rules[i],

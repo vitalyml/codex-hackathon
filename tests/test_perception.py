@@ -53,10 +53,7 @@ async def test_detect_several_predicates_in_one_call():
 
 async def test_normalize_rule():
     async def handler(request):
-        return reply(
-            '{"predicate": "a cat is on the table", '
-            '"direction": "rising", "is_transition": true}'
-        )
+        return reply('{"predicate": "a cat is on the table", ' '"direction": "rising"}')
 
     rule = await make(handler).normalize("the cat jumps onto the table")
     assert (rule.predicate, rule.direction) == ("a cat is on the table", "rising")
