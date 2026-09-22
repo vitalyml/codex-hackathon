@@ -87,6 +87,12 @@ test('Watch starts a session in Convex, live queries drive the page, Stop ends i
   const [newest, older] = p.element('events').children;
   assert.equal(newest.children.length, 2); // the photo, then the caption
   assert.equal(older.children.length, 1);  // no frame for c1: caption only
+  // Frames of calls that fired nothing are few and rotate; a shown event keeps its frame.
+  for (let i = 0; i < 20; i++) p.run(`keepFrame('quiet${i}', {})`);
+  assert.ok(p.run("frames.has('c2') && !frames.has('quiet0') && frames.has('quiet19')"));
+  // The worker's answer naming c1 arrives after the event did: the card gets its photo.
+  p.run("keepFrame('c1', {})");
+  assert.equal(p.element('events').children[1].children.length, 2);
 
   await p.run('stop()');
   same(p.calls.at(-1), ['mutation', 'sessions:stop', { sessionId: 's1' }]);

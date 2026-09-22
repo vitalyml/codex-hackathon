@@ -28,16 +28,23 @@ let heartbeat = null;
 let lastEventId = null; // null until the first event list arrives: history is not news
 // Frames that went to the model, by the call id the worker answered with. Nothing stores
 // a photo: an event names its call, and this tab is the only place that frame still is.
-const frames = new Map(); // callId -> object URL
-const KEEP_FRAMES = 50;   // as many as events:list shows
+const frames = new Map(); // callId -> object URL, oldest first
+let shownEvents = [];     // the last events:list, up to 50; their frames are kept
+const PENDING_FRAMES = 5; // frames of calls no event names (yet): most calls fire nothing
 function keepFrame(callId, jpeg) {
   frames.set(callId, URL.createObjectURL(jpeg));
-  while (frames.size > KEEP_FRAMES) {
-    const [oldest] = frames.keys();
-    URL.revokeObjectURL(frames.get(oldest)); frames.delete(oldest);
+  pruneFrames();
+  // The event can arrive before the worker's answer to the frame that caused it.
+  if (shownEvents.some((e) => e.callId === callId)) renderEvents(shownEvents);
+}
+function pruneFrames() {
+  const shown = new Set(shownEvents.map((e) => e.callId));
+  const pending = [...frames.keys()].filter((id) => !shown.has(id));
+  for (const id of pending.slice(0, Math.max(0, pending.length - PENDING_FRAMES))) {
+    URL.revokeObjectURL(frames.get(id)); frames.delete(id);
   }
 }
-function dropFrames() { for (const url of frames.values()) URL.revokeObjectURL(url); frames.clear(); }
+function dropFrames() { for (const url of frames.values()) URL.revokeObjectURL(url); frames.clear(); shownEvents = []; }
 let force = false;      // the rules changed: the next frame asks the model even if nothing moves
 let startedAt = 0, clock = null;
 function showElapsed() {
@@ -452,6 +459,8 @@ function renderUsage(u) {
 
 // The latest 50, oldest first; shown newest first.
 function renderEvents(list) {
+  shownEvents = list;
+  pruneFrames();
   const newest = list.length ? list[list.length - 1] : null;
   if (newest && lastEventId !== null && newest.id !== lastEventId) { flash(); showToast('Event! ' + newest.text); }
   lastEventId = newest ? newest.id : '';

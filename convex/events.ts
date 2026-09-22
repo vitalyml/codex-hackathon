@@ -11,7 +11,7 @@ export const list = query({
       at: v.number(),
       text: v.string(),
       rule: v.string(),
-      callId: v.string(),
+      callId: v.optional(v.string()),
     }),
   ),
   handler: async (ctx, args) => {

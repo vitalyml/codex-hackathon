@@ -57,7 +57,12 @@ export const cleanup = internalMutation({
         .query(table)
         .withIndex("by_session", (q) => q.eq("sessionId", sessionId));
     const events = await owned("events").take(BATCH);
-    for (const event of events) await ctx.db.delete(event._id);
+    for (const event of events) {
+      // Before 2026-09-22 events had a photo, shared by the events of one frame.
+      if (event.storageId && (await ctx.db.system.get(event.storageId)))
+        await ctx.storage.delete(event.storageId);
+      await ctx.db.delete(event._id);
+    }
     const done = events.length < BATCH;
     if (done) {
       for (const table of ["watches", "presence"] as const)

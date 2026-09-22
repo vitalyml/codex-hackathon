@@ -40,7 +40,10 @@ export default defineSchema({
     rule: v.string(),
     // The model call that fired it: the page keeps that frame in memory and shows it
     // next to the event. No photo is stored: the frame is the user's camera.
-    callId: v.string(),
+    // Both optional only for events recorded before 2026-09-22, which had a photo in
+    // file storage and no call id; the cleanup deletes them with their session.
+    callId: v.optional(v.string()),
+    storageId: v.optional(v.id("_storage")),
   }).index("by_session", ["sessionId"]),
 
   // A browser that may ask for Telegram alerts. Its id is the token the page keeps.
