@@ -523,27 +523,28 @@ window.addEventListener('pagehide', releaseCamera);
   let heard = '';
 
   // idle → connecting → listening. WebRTC buffers nothing: words said before the peer
-  // connection is up are gone, so the button pulses only once audio actually flows.
+  // connection and transcription session are ready are gone. Wait for both signals.
   function setState(state) {
     mic.classList.toggle('connecting', state === 'connecting');
     mic.classList.toggle('listening', state === 'listening');
     mic.setAttribute('aria-pressed', state === 'idle' ? 'false' : 'true');
     mic.title = state === 'idle' ? 'Dictate rule' : 'Stop dictation';
-    if (state === 'connecting') say('Connecting the microphone…');
-    else if (state === 'listening') say('Speak now.');
-    else if (/^(Connecting the microphone…|Speak now\.)$/.test(status.textContent)) say('');
+    mic.setAttribute('aria-busy', state === 'connecting' ? 'true' : 'false');
+    if (state === 'connecting') say('Preparing microphone… Please wait.');
+    else if (state === 'listening') say('Ready — speak now.');
+    else if (/^(Preparing microphone… Please wait\.|Ready — speak now\.)$/.test(status.textContent)) say('');
   }
 
-  // Whatever ends the run — user tap, timeout, network — the button returns to idle. The
-  // words heard so far are already in the box, so nothing is lost.
+  // Whatever ends the run — user tap, timeout, network — the button returns to idle.
+  // Text already received stays in the box; pending transcription ends with the connection.
   function hangUp() {
     clearTimeout(offTimer); offTimer = null;
-    if (pc) { pc.getSenders().forEach((s) => s.track && s.track.stop()); pc.close(); pc = null; }
+    const old = pc; pc = null;
+    if (old) { old.getSenders().forEach((s) => s.track && s.track.stop()); old.close(); }
     setState('idle');
   }
 
-  function onEvent(e) {
-    let event; try { event = JSON.parse(e.data); } catch (_) { return; }
+  function onEvent(event) {
     if (event.type === 'conversation.item.input_audio_transcription.delta') heard += event.delta;
     // models that answer phrase by phrase send no space between the phrases
     else if (event.type === 'conversation.item.input_audio_transcription.completed') heard += ' ';
@@ -555,6 +556,7 @@ window.addEventListener('pagehide', releaseCamera);
   async function listen() {
     const mine = pc = new RTCPeerConnection();
     const gone = () => pc !== mine; // tapped off, or failed, while this was still connecting
+    let sessionReady = false, listening = false;
     let streamP = null; // the mic may be granted while the key is still failing
     setState('connecting');
     base = rule.value ? rule.value.trimEnd() + ' ' : ''; heard = '';
@@ -563,20 +565,43 @@ window.addEventListener('pagehide', releaseCamera);
       // The mic prompt and the key (browser → worker → Convex → OpenAI) are the slow part;
       // they do not need each other.
       const lang = (navigator.language || '').slice(0, 2).toLowerCase();
-      streamP = navigator.mediaDevices.getUserMedia({ audio: true });
+      streamP = navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+        stream.getTracks().forEach((track) => { track.enabled = false; if (gone()) track.stop(); });
+        if (!gone()) mine.addTrack(stream.getTracks()[0], stream);
+        return stream;
+      });
       const [stream, key] = await Promise.all([
         streamP,
         api(`/subscriber/${subscriber}/stt-token${/^[a-z]{2}$/.test(lang) ? '?lang=' + lang : ''}`, { method: 'POST' }),
       ]);
       if (gone()) { stream.getTracks().forEach((t) => t.stop()); return; }
-      mine.addTrack(stream.getTracks()[0], stream);
-      mine.createDataChannel('oai-events').addEventListener('message', onEvent);
+      const channel = mine.createDataChannel('oai-events');
+      const maybeListen = () => {
+        if (gone() || listening || !sessionReady || mine.connectionState !== 'connected' || channel.readyState !== 'open') return;
+        listening = true;
+        stream.getTracks().forEach((track) => { track.enabled = true; });
+        clearTimeout(offTimer);
+        offTimer = setTimeout(hangUp, MAX_MS);
+        setState('listening');
+      };
+      channel.addEventListener('open', maybeListen);
+      channel.addEventListener('close', () => { if (!gone()) hangUp(); });
+      channel.addEventListener('error', () => { if (!gone()) hangUp(); });
+      channel.addEventListener('message', (e) => {
+        if (gone()) return;
+        let event; try { event = JSON.parse(e.data); } catch (_) { return; }
+        if (event.type === 'session.created' || event.type === 'transcription_session.created') {
+          sessionReady = true;
+          maybeListen();
+        } else onEvent(event);
+      });
       mine.addEventListener('connectionstatechange', () => {
         if (gone()) return;
-        if (mine.connectionState === 'connected') setState('listening');
+        if (mine.connectionState === 'connected') maybeListen();
         else if (['failed', 'disconnected', 'closed'].includes(mine.connectionState)) hangUp();
       });
       await mine.setLocalDescription(await mine.createOffer());
+      if (gone()) return;
       const res = await fetch(CALLS, {
         method: 'POST', body: mine.localDescription.sdp,
         headers: { Authorization: `Bearer ${key.value}`, 'Content-Type': 'application/sdp' },
@@ -599,6 +624,9 @@ window.addEventListener('pagehide', releaseCamera);
     else if (!subscriber) say('Dictation is not ready yet — try again in a moment.', true);
     else listen();
   });
+  // Add and Watch take what is in the box; words heard after that would land in the next rule.
+  form.addEventListener('submit', hangUp);
+  addBtn.addEventListener('click', hangUp);
 
   mic.hidden = false;
 })();
