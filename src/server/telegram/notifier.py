@@ -220,6 +220,17 @@ async def handle(tg: Telegram, update: dict) -> Optional[Reply]:
     muted: bool = view["muted"]
     session: Optional[dict] = view["session"]
     result = Reply(chat_id, "", menu(muted), callback.get("id"))
+    if (
+        session
+        and session.get("encrypted")
+        and (
+            command in {"rules", "rule", "add"}
+            or command.startswith(("edit:", "drop:"))
+        )
+    ):
+        tg.editing.pop(chat_id, None)
+        result.text = "🔒 Edit protected rules in the camera browser. The recovery key stays on your device."
+        return result
     if command in {"menu", "status", "start", "cancel"}:
         result.text = (
             status_text(session, muted, tg.feeds.get(session["id"]))
@@ -329,6 +340,13 @@ async def _enter_rule(tg: Telegram, chat_id: int, text: str, mode: str) -> Reply
     session = view and view["session"]
     if not view or not session:
         return Reply(chat_id, NO_WATCH, BACK)
+    if session.get("encrypted"):
+        tg.editing.pop(chat_id, None)
+        return Reply(
+            chat_id,
+            "🔒 Edit protected rules in the camera browser. The recovery key stays on your device.",
+            BACK,
+        )
     if not rule or len(rule) > 500:
         return Reply(
             chat_id,
