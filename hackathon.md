@@ -85,8 +85,9 @@ sessions, watches, events, subscribers and presence, with indexes by status, sub
 session and chat. Starting a session and adding a rule are actions that ask the worker to
 normalize the rule, then insert through a mutation that checks the session and rule
 limits in the same transaction. A 20 s heartbeat plus a cron sweep stop sessions whose
-tab is gone; other crons keep the worker awake and clean up old sessions. Event photos go
-to file storage. Convex features: schema, indexes, queries, mutations, actions, crons,
+tab is gone; a stop schedules the deletion of the session with its photos, and other crons
+keep the worker awake and catch stopped sessions that were missed. Event photos go to file
+storage and live only as long as the session: they are the user's camera. Convex features: schema, indexes, queries, mutations, actions, crons,
 file storage (`convex/schema.ts`, `convex/sessions.ts`, `convex/watches.ts`,
 `convex/worker.ts`, `convex/crons.ts`,
 `docs/decisions/ADR-20260921-convex-as-state-backend.md`).

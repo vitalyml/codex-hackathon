@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { action, internalMutation, mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
+import { stopSession } from "./crons";
 import {
   Failure,
   MAX_SESSIONS,
@@ -135,8 +136,7 @@ export const stop = mutation({
   args: { sessionId: v.id("sessions") },
   returns: v.null(),
   handler: async (ctx, { sessionId }) => {
-    if (await ctx.db.get(sessionId))
-      await ctx.db.patch(sessionId, { status: "stopped" });
+    if (await ctx.db.get(sessionId)) await stopSession(ctx, sessionId);
     return null;
   },
 });

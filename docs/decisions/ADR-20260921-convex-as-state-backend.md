@@ -112,9 +112,11 @@ also why `sessions` has no `lastSeen` of its own).
 14. **A session goes `stopped` after 180 s without a heartbeat**, and that is final.
     Background tabs throttle timers to about once a minute, so a shorter limit would kill
     hidden tabs.
-15. **Events and photos are kept until the end of the hackathon** (2026-09-25 12:00 UTC),
-    then stopped sessions are deleted. Before that date, if total events exceed 5,000
-    (about half of the 1 GB file quota), the oldest stopped sessions are deleted first.
+15. **Events and photos live only as long as the session.** Photos are the user's camera,
+    so a stop (explicit, or by the sweep) schedules the deletion of the session with its
+    events, photos, watches and presence at once, in batches of 500 events. An hourly
+    cron deletes any stopped session that schedule missed. (Until 2026-09-22 stopped
+    sessions were kept until the end of the hackathon, bounded by a 5,000-event quota.)
 16. **Free use is limited to 10 minutes**, counted from the creation time of the
     *subscriber* (the token the browser gets on first load), so Stop → Start does not reset
     it. After the limit the worker is told the session is closed and stops calling the

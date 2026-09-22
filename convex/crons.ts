@@ -1,12 +1,15 @@
 import { cronJobs } from "convex/server";
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
-import { internalAction, internalMutation } from "./_generated/server";
+import { Id } from "./_generated/dataModel";
+import {
+  MutationCtx,
+  internalAction,
+  internalMutation,
+} from "./_generated/server";
 import { workerUrl } from "./lib";
 
-const HACKATHON_END = Date.UTC(2026, 8, 25, 12); // 2026-09-25 12:00 UTC
 const BATCH = 500; // events deleted per cleanup run
-const MAX_EVENTS = 5000; // about half of the 1 GB file quota at 50-100 KB a photo
 
 /** The free Render plan spins down after 15 minutes without inbound traffic and takes
  * about a minute to wake. */
@@ -25,22 +28,25 @@ export const keepAlive = internalAction({
   },
 });
 
-/** Stopped sessions are kept until the hackathon ends, unless photos eat the quota:
- * then the oldest go first, one at a time, until the count is back under the limit.
- * One bounded batch per run, then it schedules itself: a session with thousands of
- * events must not hit the transaction limits. A session once started is finished
- * (`resume`) even if the count drops under the limit halfway: events of one frame share
- * a photo, and a half-deleted session would keep events without theirs.
- * `now` is for testing. */
+/** A stop is final: the session goes `stopped` and its deletion is scheduled at once.
+ * Photos are the user's camera and live only as long as the session. */
+export async function stopSession(ctx: MutationCtx, sessionId: Id<"sessions">) {
+  await ctx.db.patch(sessionId, { status: "stopped" });
+  await ctx.scheduler.runAfter(0, internal.crons.cleanup, { resume: sessionId });
+}
+
+/** Deletes stopped sessions with their events and photos, one session at a time. One
+ * bounded batch per run, then it schedules itself: a session with thousands of events
+ * must not hit the transaction limits. A session once started is finished (`resume`):
+ * events of one frame share a photo, and a half-deleted session would keep events
+ * without theirs. Scheduled by `stopSession`; the hourly cron catches anything that
+ * schedule missed. */
 export const cleanup = internalMutation({
-  args: { now: v.optional(v.number()), resume: v.optional(v.id("sessions")) },
+  args: { resume: v.optional(v.id("sessions")) },
   returns: v.null(),
   handler: async (ctx, args) => {
     let session = args.resume ? await ctx.db.get(args.resume) : null;
     if (!session) {
-      const over =
-        (await ctx.db.query("events").take(MAX_EVENTS + 1)).length > MAX_EVENTS;
-      if ((args.now ?? Date.now()) < HACKATHON_END && !over) return null;
       session = await ctx.db
         .query("sessions")
         .withIndex("by_status", (q) => q.eq("status", "stopped"))
@@ -67,7 +73,6 @@ export const cleanup = internalMutation({
       await ctx.db.delete(sessionId);
     }
     await ctx.scheduler.runAfter(0, internal.crons.cleanup, {
-      now: args.now,
       resume: done ? undefined : sessionId,
     });
     return null;
@@ -77,5 +82,5 @@ export const cleanup = internalMutation({
 const crons = cronJobs();
 crons.interval("stop stale sessions", { minutes: 1 }, internal.presence.sweep, {});
 crons.interval("keep the worker awake", { minutes: 10 }, internal.crons.keepAlive, {});
-crons.interval("delete old sessions", { hours: 1 }, internal.crons.cleanup, {});
+crons.interval("delete stopped sessions", { hours: 1 }, internal.crons.cleanup, {});
 export default crons;

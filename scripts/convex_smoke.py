@@ -88,6 +88,13 @@ async def main() -> None:
         await convex.mutation("worker:unlink", chatId=CHAT)
         await convex.mutation("sessions:stop", sessionId=session)
     assert await convex.query("worker:telegram", chatId=CHAT) is None
+    # A stop schedules the deletion of the session with its photos.
+    for _ in range(20):
+        if await convex.query("sessions:live", sessionId=session) is None:
+            break
+        await asyncio.sleep(0.5)
+    assert await convex.query("sessions:live", sessionId=session) is None
+    assert await convex.query("worker:event", chatId=CHAT, **args) is None
     await convex.aclose()
     print("convex smoke: ok")  # a script's result, not application logging
 

@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { internalMutation, mutation } from "./_generated/server";
+import { stopSession } from "./crons";
 import { STALE_MS } from "./lib";
 
 /** The page calls this every 20 s, also while paused and sending no frames. */
@@ -33,7 +34,7 @@ export const sweep = internalMutation({
         .withIndex("by_session", (q) => q.eq("sessionId", session._id))
         .unique();
       if (!row || Date.now() - row.lastSeen > STALE_MS)
-        await ctx.db.patch(session._id, { status: "stopped" });
+        await stopSession(ctx, session._id);
     }
     return null;
   },
