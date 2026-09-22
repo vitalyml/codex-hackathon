@@ -22,10 +22,9 @@ const HEARTBEAT_MS = 20000;
 // mutations and actions. Only camera frames go to the worker.
 const client = window.CONVEX_URL ? new convex.ConvexClient(window.CONVEX_URL) : null;
 const usage = $('usage'), cost = $('cost'), elapsed = $('elapsed');
-const limit = $('limit'), pay = $('pay');
 let generation = 0;
 let unsubscribe = []; // live queries of the running session
-let heartbeat = null, limitTimer = null;
+let heartbeat = null;
 let lastEventId = null; // null until the first event list arrives: history is not news
 let force = false;      // the rules changed: the next frame asks the model even if nothing moves
 let startedAt = 0, clock = null;
@@ -136,8 +135,6 @@ async function subscribe() {
 // The QR stays on screen whether or not the chat is linked - only the badge changes.
 // It is hidden in exactly one case: no bot is configured, so there is nothing to offer.
 function showSubscription(token, s) {
-  subscriberLimit = s.limitAt;
-  if (!session) armLimit(subscriberLimit);
   if (!BOT) {
     notify.hidden = true;
     return;
@@ -173,27 +170,6 @@ qrImg.addEventListener('load', () => {
   qrFallback.hidden = true;
   delete qrImg.dataset.retry;
 });
-
-// ---------- free limit ----------
-// Counted from the subscriber's first visit, so Stop -> Watch does not reset it. The worker
-// stops calling the model on its own; this is only the page saying why.
-// One limit applies at a time: inside a session the session's own (sessions:live), which
-// for a shared link is the owner's; outside, this browser's (subscribers:get). The banner
-// and the Watch button follow whichever is armed.
-let subscriberLimit = Infinity;
-
-function armLimit(at) {
-  clearTimeout(limitTimer); limitTimer = null;
-  const left = at - Date.now();
-  if (left <= 0) startBtn.disabled = true;
-  else if (!limit.hidden) startBtn.disabled = false; // the limit that was over no longer applies
-  limit.hidden = left > 0;
-  if (left > 0) {
-    if (left < Infinity) limitTimer = setTimeout(() => armLimit(at), Math.min(left, 60000));
-    return;
-  }
-  if (session) stop('Free time is over.'); // last: stop() re-arms the subscriber's limit
-}
 
 // ---------- api ----------
 async function api(path, init) {
@@ -351,7 +327,6 @@ async function start(rules) {
   startBtn.disabled = false;
   if (created.error) {
     if (created.error === 'full') say('The room is full right now. Try again in a minute.', true);
-    else if (created.error === 'limit') armLimit(0);
     else say(created.hint || created.error, true);
     return;
   }
@@ -364,9 +339,6 @@ function adopt(id, started) {
   localStorage.setItem(SESSION_KEY, id);
   history.replaceState(null, '', `?session=${id}`);
   startBtn.hidden = true; stopBtn.hidden = false; restartBtn.hidden = false;
-  // The subscriber's limit stops applying right now, not when sessions:live first answers:
-  // its timer firing in between would stop a session that may be someone else's.
-  clearTimeout(limitTimer); limitTimer = null; limit.hidden = true;
   pending = []; rule.value = '';
   startedAt = started; showElapsed(); clock = setInterval(showElapsed, 1000);
   events.innerHTML = ''; lastEventId = null; evidence.textContent = '—';
@@ -423,7 +395,6 @@ function stop(message, keepCamera = false, gone = false) {
   forget();
   if (!keepCamera) releaseCamera();
   startBtn.disabled = false; addBtn.disabled = false;
-  armLimit(subscriberLimit); // the session's limit is gone with it; this browser's own applies again
   startBtn.hidden = false; stopBtn.hidden = true; restartBtn.hidden = true;
   renderRules();
   clearInterval(clock); clock = null;
@@ -457,7 +428,6 @@ function renderLive(view) {
   const seen = view.watches.map((w) => w.evidence).filter(Boolean);
   evidence.textContent = seen.length ? seen.map((e) => `“${e}”`).join(' · ') : '—';
   renderUsage(view.usage);
-  armLimit(view.limitAt);
 }
 
 function renderUsage(u) {
@@ -540,13 +510,6 @@ document.addEventListener('visibilitychange', () => {
 // The session is not stopped here: a reload resumes it, and one that never comes back is
 // stopped by the sweep once its heartbeats end.
 window.addEventListener('pagehide', releaseCamera);
-// No payments during the hackathon: the button restarts free use. subscribers:get pushes the
-// new limitAt, and armLimit hides the banner and frees the Watch button.
-pay.addEventListener('click', async () => {
-  await client.mutation('subscribers:renew', { token: subscriber });
-  showToast('No charge during the hackathon — 10 more free minutes.');
-});
-
 // ---------- dictation ----------
 // Live speech-to-text for the rule box through OpenAI Realtime. The worker only mints a
 // one-minute key (/subscriber/<token>/stt-token); the microphone goes from this browser to
@@ -613,7 +576,6 @@ pay.addEventListener('click', async () => {
       if (gone()) return;
       hangUp();
       if (e.name === 'NotAllowedError') say('Microphone blocked — allow it or type the rule.', true);
-      else if (e.status === 403) say('Free time is over.', true);
       else say(`Dictation unavailable: ${e.message}`, true);
     }
   }

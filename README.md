@@ -275,8 +275,8 @@ Convex functions: a frame a second per session, and OpenCV.
   the same Convex state as the page.
 
 The worker keeps only what is safe to lose: the gate's anchor frame and the last frame
-for Telegram snapshots. Restart it mid-session and the next frame carries on. Free use is
-limited to 10 minutes per browser. Settings are environment variables with defaults; see
+for Telegram snapshots. Restart it mid-session and the next frame carries on.
+Settings are environment variables with defaults; see
 `.env.example` and `src/config.py`.
 
 ## What it costs

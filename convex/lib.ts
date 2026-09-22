@@ -5,7 +5,6 @@ import { QueryCtx } from "./_generated/server";
 export const MAX_SESSIONS = 10; // active at once: each one holds a model budget
 export const MAX_WATCHES = 5; // rules per session
 export const MAX_SUBSCRIBERS = 100;
-export const FREE_MS = 10 * 60 * 1000; // free use, counted from the subscriber's creation or renewal
 // Background tabs throttle timers to about once a minute, so anything shorter kills them.
 export const STALE_MS = 180 * 1000;
 
@@ -34,24 +33,6 @@ export function addUsage(a: Usage, b: Usage): Usage {
 export function checkSecret(secret: string): void {
   const expected = process.env.WORKER_SECRET;
   if (!expected || secret !== expected) throw new Error("forbidden");
-}
-
-/** Free use of a subscriber ends here; a session without one counts from its own start. */
-export function freeUntil(doc: Doc<"subscribers"> | Doc<"sessions">): number {
-  return (("freeFrom" in doc && doc.freeFrom) || doc._creationTime) + FREE_MS;
-}
-
-/** When free use ends. A timestamp, not a boolean: query results are cached, so the
- * caller compares it with its own clock. Stop -> Start keeps the subscriber, so it does
- * not reset the limit. */
-export async function limitAt(
-  ctx: QueryCtx,
-  session: Doc<"sessions">,
-): Promise<number> {
-  const subscriber = session.subscriberId
-    ? await ctx.db.get(session.subscriberId)
-    : null;
-  return freeUntil(subscriber ?? session);
 }
 
 export type Spec = {

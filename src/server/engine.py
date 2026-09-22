@@ -12,7 +12,6 @@ back.
 
 import asyncio
 import secrets
-import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -120,11 +119,7 @@ async def _observe(
     notifier: Notifier,
 ) -> None:
     view = await convex.query("sessions:live", sessionId=session_id)
-    if (
-        view is None
-        or view["status"] != "active"
-        or time.time() * 1000 > view["limitAt"]
-    ):
+    if view is None or view["status"] != "active":
         feed.closed = True
         logger.info("session={} closed: no more model calls", session_id)
         return

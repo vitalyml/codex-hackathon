@@ -3,14 +3,12 @@ import { internal } from "./_generated/api";
 import { action, internalMutation, mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 import {
-  freeUntil,
   Failure,
   MAX_SESSIONS,
   MAX_WATCHES,
   addUsage,
   direction,
   failure,
-  limitAt,
   normalize,
   usageValidator,
 } from "./lib";
@@ -69,8 +67,6 @@ export const create = internalMutation({
     const subscriberId =
       args.subscriber && ctx.db.normalizeId("subscribers", args.subscriber);
     const subscriber = subscriberId ? await ctx.db.get(subscriberId) : null;
-    if (subscriber && Date.now() > freeUntil(subscriber))
-      return { error: "limit", hint: "free use is over" };
     const sessionId = await ctx.db.insert("sessions", {
       status: "active",
       subscriberId: subscriber?._id,
@@ -110,7 +106,6 @@ export const live = query({
       ),
       usage: usageValidator,
       startedAt: v.number(),
-      limitAt: v.number(),
       telegram: v.boolean(),
     }),
   ),
@@ -137,7 +132,6 @@ export const live = query({
       })),
       usage: session.usage,
       startedAt: session._creationTime,
-      limitAt: await limitAt(ctx, session),
       telegram: subscriber?.chatId !== undefined,
     };
   },

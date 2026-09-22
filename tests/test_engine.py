@@ -92,8 +92,7 @@ async def test_failure_retries_on_a_quiet_scene_and_force_asks_again():
 async def test_stopped_or_expired_session_gets_no_model_calls():
     convex, model, notifier = FakeConvex(), Answers(), Notifier()
     convex.add("stopped", ("r", "p", "rising"))["status"] = "stopped"
-    convex.add("expired", ("r", "p", "rising"))["limitAt"] = 0
-    for session_id in ("stopped", "expired", "deleted"):
+    for session_id in ("stopped", "deleted"):
         feed = Feed()
         await handle_frame(feed, session_id, image(), model, convex, notifier)
         await feed.task

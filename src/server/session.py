@@ -21,7 +21,7 @@ class Feed:
     gate: Gate = field(default_factory=Gate)
     busy: bool = False  # a model call is in flight
     retry: bool = False  # ask the model on the next frame even if the scene is quiet
-    closed: bool = False  # Convex said: stopped, gone, or past the free limit
+    closed: bool = False  # Convex said: stopped or gone
     latest_frame: bytes = b""  # Telegram "snapshot" waits for a fresh one
     frame_at: str = ""
     frame_received: asyncio.Event = field(default_factory=asyncio.Event)

@@ -5,8 +5,6 @@ import copy
 
 from src.server.convex_client import ConvexError
 
-FOREVER = 2**62
-
 
 class FakeConvex:
     def __init__(self) -> None:
@@ -24,7 +22,6 @@ class FakeConvex:
         """watches: (rule, predicate, direction)."""
         self.sessions[session_id] = {
             "status": "active",
-            "limitAt": FOREVER,
             "watches": [
                 dict(
                     id=f"{session_id}-w{i}",

@@ -119,7 +119,7 @@ def test_page_config_qr_and_cross_origin_page(monkeypatch):
     assert "access-control-allow-origin" not in other.headers
 
 
-def test_stt_token_goes_only_to_a_subscriber_with_free_time_left():
+def test_stt_token_goes_only_to_a_known_subscriber():
     asked = []
 
     def openai(request: httpx.Request) -> httpx.Response:
@@ -130,13 +130,11 @@ def test_stt_token_goes_only_to_a_subscriber_with_free_time_left():
         transport=httpx.MockTransport(openai), base_url="https://api.openai.com/v1"
     )
     convex = FakeConvex()
-    convex.subscribers["fresh"] = {"linked": False, "limitAt": time.time() * 1000 + 1e6}
-    convex.subscribers["spent"] = {"linked": False, "limitAt": 0}
+    convex.subscribers["fresh"] = {"linked": False}
     quiet = create_app(FakePerception(), convex, Notifier())
     assert TestClient(quiet).post("/subscriber/fresh/stt-token").status_code == 404
     client = TestClient(create_app(FakePerception(), convex, Notifier(), stt=stt))
     assert client.post("/subscriber/nobody/stt-token").status_code == 404
-    assert client.post("/subscriber/spent/stt-token").status_code == 403
     assert client.post("/subscriber/fresh/stt-token?lang=russian").status_code == 422
     assert asked == []
     assert client.post("/subscriber/fresh/stt-token?lang=ru").json() == {

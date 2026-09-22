@@ -1,6 +1,6 @@
 /** What only the Python worker may call. Every function checks the shared secret first.
  * To read a session the worker uses the public sessions:live - it has the watches with
- * their tracker state, the status and limitAt, and needs no secret. */
+ * their tracker state and the status, and needs no secret. */
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";

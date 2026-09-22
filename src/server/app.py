@@ -4,7 +4,6 @@ the page talks to Convex for everything except the frame stream, which comes her
 import asyncio
 import json
 import secrets
-import time
 from contextlib import asynccontextmanager
 from pathlib import Path as FilePath
 from typing import Optional
@@ -178,16 +177,14 @@ def create_app(
         OpenAI itself over WebRTC, so the audio never crosses this worker."""
         if stt is None:
             raise HTTPException(404, "dictation is not configured")
-        # ponytail: the limit is the only gate, and subscribers:renew reopens it for
-        # free - rate-limit per subscriber once payments are real.
+        # ponytail: any known subscriber gets a key - rate-limit per subscriber if
+        # someone starts farming them.
         try:
             subscriber = await convex.query("subscribers:get", token=token)
         except ConvexError as e:
             raise HTTPException(503, f"state backend unavailable: {e}")
         if subscriber is None:
             raise HTTPException(404, "no such subscriber")
-        if time.time() * 1000 > subscriber["limitAt"]:
-            raise HTTPException(403, "free use is over")
         transcription = {"model": config.OPENAI_STT_MODEL}
         if lang:
             transcription["language"] = lang
