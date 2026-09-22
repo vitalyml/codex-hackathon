@@ -23,6 +23,7 @@ Grok's vision API does the looking; Render hosts it; the phone just has to have 
 - [Why it's different](#why-its-different)
 - [Use it for](#use-it-for)
 - [Preprocessing: why a static room costs nothing](#preprocessing-why-a-static-room-costs-nothing)
+- [Convex: the backend](#convex-the-backend)
 - [Privacy: protection without extra steps](#privacy-protection-without-extra-steps)
 - [Run it yourself](#run-it-yourself)
 - [Under the hood](#under-the-hood)
@@ -32,10 +33,13 @@ Grok's vision API does the looking; Render hosts it; the phone just has to have 
 
 ## How it works
 
-![Watcher architecture: camera frames enter the server, the gate drops static scenes, only changed frames go to Grok, the tracker fires once per event and Telegram delivers the proof photo](docs/images/architecture.png)
+![Watcher architecture: the browser sends JPEG frames and rule text to a Python worker on Render; rules are normalised into predicates, the gate drops static scenes, only changed frames go to the vision model, the tracker fires once per event and Telegram delivers the proof photo; Convex stores encrypted events and session state and streams live results back to the page](docs/images/architecture2.png)
 
-Many frames in, few model calls, one alert per event. The gate in the middle is where most
-frames die; everything to its right runs only when the scene actually changed.
+Many frames in, few model calls, encrypted history. The browser posts frames and rules to
+a stateless Python worker; the gate in the middle is where most frames die, and everything
+to its right runs only when the scene actually changed. Convex holds session state and the
+encrypted event history and pushes live results back to the page; Telegram gets the alert
+with the proof photo.
 
 ## What it feels like
 
@@ -201,6 +205,52 @@ lighting changes and objects and compares it with the original pixel-diff filter
 without calling any model. Synthetic cases only; real shadows, clipped highlights, big
 camera moves and flat scenes may still trigger calls.
 
+## Convex: the backend
+
+![Convex in Watcher: the browser talks to Convex over one WebSocket with live queries and mutations, static hosting serves the page, the Python worker reads rules and tracker state before each model call and writes the answer back through a shared-secret worker API, crons stop stale sessions, keep the free Render worker awake and clean up old data; camera frames go straight to the worker and never pass through Convex](docs/images/convex.png)
+
+**Convex is the application.** The Python worker is compute only: frames in, model answer
+out, nothing durable. Everything that makes Watcher a product rather than a demo script
+lives in Convex: sessions, rules with their tracker state, events, token usage, Telegram
+subscribers, and the encrypted history.
+
+Before Convex all of that sat in the memory of one Render process. A deploy, a restart or a
+free-tier spin-down erased every session, every event and every Telegram link, and the
+page learned about changes through a hand-rolled Server-Sent Events stream. Convex replaced
+that with less code and solved several things at once:
+
+- **State survives the worker.** The worker reads the rules and tracker state from Convex
+  before each model call and writes one answer back with one mutation (`worker:record`).
+  It keeps no copy of the rules, so there is no second source of truth, and a worker
+  restart mid-session loses nothing but the frame buffer. A `callId` on the session makes
+  the retry of a failed save harmless.
+- **Live updates for free.** The page subscribes to `sessions:live`, `events:list` and
+  `subscribers:get`. Any write, whether from the worker, the Telegram bot or another tab,
+  shows up on the page instantly. The SSE stream, its reconnect logic and its keep-alive
+  are gone; a 20 s heartbeat mutation plus a cron sweep replace them.
+- **Telegram and the browser share one state.** A rule added from Telegram appears on the
+  page; a rule removed on the page disappears from the bot's dashboard. Both are just
+  mutations on the same `watches` table.
+- **Scheduling without another service.** Three crons: stop sessions whose page went away
+  (every minute), ping the worker so the free Render plan does not spin down (every
+  10 minutes), and delete stopped sessions in bounded batches (hourly, and right after
+  each stop).
+- **Static hosting.** The page itself is served from Convex (`@convex-dev/static-hosting`),
+  so the whole product is one `convex.site` URL plus a stateless worker.
+- **Encrypted history has a home.** Rules and observations reach Convex already encrypted;
+  the public key on the session and the ciphertext in `watches` and `events` are what the
+  database holds. See [Privacy](#privacy-protection-without-extra-steps).
+
+One deliberate boundary: camera frames never pass through Convex. About one frame per
+second per session would burn the free-tier function budget within hours, and OpenCV work
+does not belong in a Convex function. The browser posts frames straight to the worker;
+Convex sees only the answers. Rule normalisation goes the other way: a Convex action calls
+the worker's `/internal/normalize` to turn rule text into a predicate, so the browser only
+ever talks to Convex for state changes.
+
+The design and its trade-offs are written up in
+[docs/decisions/ADR-20260921-convex-as-state-backend.md](docs/decisions/ADR-20260921-convex-as-state-backend.md).
+
 ## Privacy: protection without extra steps
 
 **Pointing a camera into your home takes trust. Watcher makes privacy part of the
@@ -261,12 +311,13 @@ make lint                    # black --check, isort --check, mypy
 
 ## Under the hood
 
-One FastAPI process, one static page, no database. Hosted on Render: `render.yaml`
-deploys on every push to `master`, Render terminates TLS, which browsers require before
-they hand over the camera.
+One FastAPI worker on Render, one static page on Convex static hosting, Convex as the
+database. `render.yaml` deploys the worker on every push to `master`; Render terminates
+TLS, which browsers require before they hand over the camera.
 
-- **Browser** grabs a frame every 1 to 10 seconds (your slider), JPEG-encodes it, posts it.
-  Model results come back over Server-Sent Events.
+- **Browser** grabs a frame every 1 to 10 seconds (your slider), JPEG-encodes it, posts it
+  to the worker. Rules are typed or dictated (speech-to-text through the same OpenAI API).
+  Results, events and session state come back through Convex live queries.
 - **Gate** (`src/server/cv/gate.py`) decides whether the frame is worth a model call.
   See [Preprocessing: why a static room costs nothing](#preprocessing-why-a-static-room-costs-nothing).
 - **Perception** (`src/server/cv/perception.py`) is Grok's vision API through the
@@ -282,24 +333,34 @@ they hand over the camera.
   photo. The bot binds to a browser, not a session, so one QR scan covers everything
   that browser watches later.
 
-Sessions live in memory and expire after 30 seconds of silence. Settings are environment
+- **Convex** (`convex/`) stores sessions, rules, encrypted events, usage and Telegram
+  subscribers; a cron cleans up old data. The worker keeps only the frame buffer, the gate
+  anchor and in-flight calls in memory.
+
+Sessions expire after 30 seconds of silence. Settings are environment
 variables with defaults; see `.env.example` and `src/config.py`.
 
 ## What it costs
 
-The counter on the page is not an estimate: every Grok response carries the exact
-amount billed for that call (`usage.cost_in_usd_ticks`, 1 tick = 1e-10 USD), and the
-session just adds them up. Cached prompt tokens and image tokens are already priced in.
+The counter on the page is an estimate, not a bill: OpenAI reports tokens, not money, so
+the worker multiplies every response's prompt and completion tokens by the configured
+per-million prices (`OPENAI_PRICE_IN`, `OPENAI_PRICE_OUT`) and the session adds them up.
 
-One call is one frame plus all your rules, about 520 prompt tokens with a single rule:
-240 for the image, the rest for the prompt text, which xAI mostly serves from cache.
-That is $0.0004 to $0.0006 on `grok-4.20-0309-non-reasoning`. What you pay per day is
-that number times how many frames reach the model, and two things decide that: the
-slider and the gate.
+One call is one frame plus all your rules. With image `detail: low` the frame is about
+85 tokens and the whole prompt lands near 190 tokens with a single rule; the answer is
+some 25 tokens. At $2.50 per million in and $10 per million out that is $0.0007 per call
+on `gpt-4o`, measured on 21 September with 640 px frames. Prompt caching cannot help here:
+it needs a 1,024-token identical prefix, and ours is about 100 tokens of text followed by
+a frame that differs every time. What you pay per day is that number times how many
+frames reach the model, and two things decide that: the slider and the gate.
 
-![Watcher cost by frame interval: max assumes the gate passes every frame at $0.0006 per call, avg is a real session where the gate passed about 20% of frames at $0.0005 per call; 1 s interval is $52 per day worst case and $8.7 typical, 10 s is $5.2 and $0.9](docs/images/cost.png)
+![Watcher cost by frame interval on gpt-4o with image detail low: one call is 189 prompt tokens plus 24 completion tokens, $0.0007; at a 1 s interval a day costs $61.6 if the gate passes every frame and $12.3 in a typical session where it passes about 20%; at 10 s it is $6.2 and $1.2; a 10-minute session is $0.43 max and $0.09 typical](docs/images/cost.png)
 
 Max is the ceiling: the scene changes every frame and the gate lets everything through.
-Avg is a measured session: a room where something happened now and then, the gate
+Typical is a measured session: a room where something happened now and then, the gate
 dropped four frames out of five. Cost is linear in the interval, so doubling the slider
-halves the bill. A tab in the background sends nothing.
+halves the bill. A tab in the background sends nothing. `OPENAI_IMAGE_DETAIL=auto` brings
+the full-resolution frame back at roughly twice the price per call, should small objects
+get missed.
+
+The figure is produced by `scripts/cost_figure.py`.
