@@ -3,7 +3,7 @@ import { internal } from "./_generated/api";
 import { action, internalMutation, mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 import {
-  FREE_MS,
+  freeUntil,
   Failure,
   MAX_SESSIONS,
   MAX_WATCHES,
@@ -69,7 +69,7 @@ export const create = internalMutation({
     const subscriberId =
       args.subscriber && ctx.db.normalizeId("subscribers", args.subscriber);
     const subscriber = subscriberId ? await ctx.db.get(subscriberId) : null;
-    if (subscriber && Date.now() > subscriber._creationTime + FREE_MS)
+    if (subscriber && Date.now() > freeUntil(subscriber))
       return { error: "limit", hint: "free use is over" };
     const sessionId = await ctx.db.insert("sessions", {
       status: "active",

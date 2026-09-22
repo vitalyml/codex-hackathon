@@ -46,5 +46,6 @@ export default defineSchema({
     chatId: v.optional(v.number()), // Telegram chat bound via /start <token>
     muted: v.boolean(),
     lastSeen: v.number(),
+    freeFrom: v.optional(v.number()), // free use restarted: see subscribers:renew
   }).index("by_chat", ["chatId"]),
 });

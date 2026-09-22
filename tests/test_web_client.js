@@ -144,3 +144,16 @@ test("a visitor's own expired limit never stops a session opened by a shared lin
   assert.equal(p.element('limit').hidden, false);
   assert.equal(p.element('start').disabled, true);
 });
+
+test('a renewed limit hides the banner and frees the Watch button', async () => {
+  const stored = { 'watcher.subscriber': 'sub1' };
+  const p = page({ stored, answers: { 'subscribers:get': { linked: false, limitAt: Date.now() - 1000 } } });
+  await p.settle();
+  p.push('subscribers:get', { linked: false, limitAt: Date.now() - 1000 });
+  assert.equal(p.element('limit').hidden, false);
+  assert.equal(p.element('start').disabled, true);
+  // what subscribers:renew makes subscribers:get push
+  p.push('subscribers:get', { linked: false, limitAt: Date.now() + 600000 });
+  assert.equal(p.element('limit').hidden, true);
+  assert.equal(p.element('start').disabled, false);
+});

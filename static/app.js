@@ -540,7 +540,10 @@ document.addEventListener('visibilitychange', () => {
 // The session is not stopped here: a reload resumes it, and one that never comes back is
 // stopped by the sweep once its heartbeats end.
 window.addEventListener('pagehide', releaseCamera);
-pay.addEventListener('click', () => showToast('Payments are not wired up — this is a hackathon demo.'));
+// No payments during the hackathon: the button restarts free use. subscribers:get pushes the
+// new limitAt, and armLimit hides the banner and frees the Watch button.
+pay.addEventListener('click', async () => {
+  await client.mutation('subscribers:renew', { token: subscriber });
 
 // ---------- dictation ----------
 // Browser-native speech-to-text for the rule box. No backend, no upload. Where the API is

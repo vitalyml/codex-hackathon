@@ -72,6 +72,7 @@ body.flash { animation: flash .7s ease-out; }
 .primer summary::-webkit-details-marker { display: none; }
 .primer summary::before { content: "\25b8"; color: var(--brand); font-size: 14px; }
 .primer[open] summary::before { content: "\25be"; }
+.primer:not([open]) summary::after { content: "click for details"; font-weight: 400; text-transform: none; letter-spacing: 0; }
 .primer .steps { margin: 12px 0 0; padding: 0; list-style: none; counter-reset: step; display: grid; gap: 10px; max-width: 70ch; }
 .primer .steps li { position: relative; padding-left: 36px; color: var(--muted); font-size: 14px; line-height: 1.5; }
 .primer .steps li::before { counter-increment: step; content: counter(step); position: absolute; left: 0; top: 1px;

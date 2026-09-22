@@ -1,6 +1,6 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
-import { FREE_MS, MAX_SUBSCRIBERS } from "./lib";
+import { freeUntil, MAX_SUBSCRIBERS } from "./lib";
 
 /** A browser asks for a notification channel on first load. Outlives its sessions. */
 export const create = mutation({
@@ -42,7 +42,19 @@ export const get = query({
     if (!subscriber) return null;
     return {
       linked: subscriber.chatId !== undefined,
-      limitAt: subscriber._creationTime + FREE_MS,
+      limitAt: freeUntil(subscriber),
     };
+  },
+});
+
+/** The Pay button. No payments during the hackathon, so it restarts free use for nothing.
+ * ponytail: anyone may call it again and again - put a real payment check here later. */
+export const renew = mutation({
+  args: { token: v.string() },
+  returns: v.null(),
+  handler: async (ctx, { token }) => {
+    const id = ctx.db.normalizeId("subscribers", token);
+    if (id && (await ctx.db.get(id))) await ctx.db.patch(id, { freeFrom: Date.now() });
+    return null;
   },
 });
