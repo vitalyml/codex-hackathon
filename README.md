@@ -23,7 +23,7 @@ Grok's vision API does the looking; Render hosts it; the phone just has to have 
 - [Why it's different](#why-its-different)
 - [Use it for](#use-it-for)
 - [Preprocessing: why a static room costs nothing](#preprocessing-why-a-static-room-costs-nothing)
-- [Privacy: no photos stored, text encrypted](#privacy-no-photos-stored-text-encrypted)
+- [Privacy: protection without extra steps](#privacy-protection-without-extra-steps)
 - [Run it yourself](#run-it-yourself)
 - [Under the hood](#under-the-hood)
 - [What it costs](#what-it-costs)
@@ -201,50 +201,39 @@ lighting changes and objects and compares it with the original pixel-diff filter
 without calling any model. Synthetic cases only; real shadows, clipped highlights, big
 camera moves and flat scenes may still trigger calls.
 
-## Privacy: no photos stored, text encrypted
+## Privacy: protection without extra steps
 
-Watcher watches your home, so what it keeps is kept to a minimum.
+**Pointing a camera into your home takes trust. Watcher makes privacy part of the
+session, without giving you another thing to manage.**
 
-**No photo is stored anywhere.** A frame lives in memory only while the model looks
-at it. When an event fires, the worker sends that frame to Telegram straight from
-memory and the page shows the copy it already had. The database records only which
-model call fired the event, never the picture. Stop the session and even that record is
-deleted along with the session.
+Press **Watch** and protection starts automatically. No passwords to invent, no keys
+to download or exchange, no recovery setup. The interface stays focused on what you
+want to watch for.
 
-**Your rules and the model's words are encrypted before they reach the database.**
-Rules, their normalised form, the model's evidence and event text are saved in Convex
-as ciphertext that only your browser can open.
+- **Your words are protected in the database.** Rules, the model's observations and
+  event text reach Convex already encrypted. A database copy alone cannot reveal them.
+- **Each watch gets a fresh key.** The private key lives only in the camera tab's
+  memory. It is never saved or exported, and is discarded on **Stop**, reload or tab
+  closure. Previous sessions cannot be reopened through the app.
+- **Camera frames stay out of the database.** Watcher processes frames in memory;
+  event snapshots are available in the current tab and sent to Telegram when you
+  enable alerts. Telegram messages remain in your chat.
 
-![How user prompts are encrypted: the browser holds an RSA key pair, encrypts each text with a fresh AES-256-GCM key, wraps that key with RSA-OAEP and saves both to Convex; reading reverses it in the browser. The private key and the plaintext AES key never leave the browser](docs/images/encrypt.png)
+![How user prompts are encrypted: AES-256-GCM encrypts each text field, RSA-OAEP wraps its key, and the browser decrypts the stored data](docs/images/encrypt.png)
 
-How it works, left to right:
+The engineering behind this is deliberately invisible: Web Crypto creates a new
+RSA-OAEP key pair for each session, and each text field gets a fresh AES-256-GCM key.
+The browser encrypts rules; the Python worker encrypts the model's observations using
+only the public key. Convex stores the ciphertext and public key, while the private
+key stays with the browser.
 
-1. **One key pair per browser.** On first use the page generates an RSA-OAEP key pair
-   with Web Crypto. The private key stays in the browser's IndexedDB. Only the public
-   key goes to Convex, where it identifies the recipient of a session's text.
-2. **A fresh AES key per text.** Every field is encrypted with its own random
-   AES-256-GCM key and nonce. The field name is authenticated as additional data, so a
-   ciphertext moved to another field fails to decrypt.
-3. **The AES key is wrapped with the public key.** RSA-OAEP encrypts the AES key; the
-   stored record holds the encrypted text plus the encrypted key, nothing that can open
-   either.
-4. **Reading reverses it in the browser.** The private key unwraps the AES key, the
-   AES key decrypts the text. The private key and the plaintext AES key are never sent
-   to Convex.
+**The boundary is clear.** The worker and AI provider see the frames and rules needed
+for processing, and Telegram receives readable alerts when enabled. Encrypted records
+and metadata remain in Convex after a session ends; discarding the private key does
+not delete those records. The protection applies to database storage; it does not
+cover a compromised browser.
 
-The Python worker does the same for what the model writes: it encrypts evidence and
-event text with the session's public key and never holds the private key. Telegram
-shows placeholders for stored text; live alerts still arrive readable, because the alert
-is the point.
-
-The page has a **Download key** button. The recovery file holds the private key in
-clear, so keep it private; **Import key** on another device opens your saved sessions
-there. Clearing site data or closing an incognito window deletes the key with the rest
-of the profile, and without it the history is unreadable to anyone, including us.
-
-What this does not do: the model still sees your frames and rules in clear, and
-metadata (timestamps, session ids, ciphertext sizes) stays visible. It protects the text
-in a database dump, not against a compromised browser.
+[Implementation and session lifecycle →](docs/encrypted-history.md)
 
 ## Run it yourself
 

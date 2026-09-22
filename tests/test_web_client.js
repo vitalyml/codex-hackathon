@@ -43,7 +43,7 @@ function page({ stored = {}, search = '', answers = {} } = {}) {
       setItem: (k, v) => { storage[k] = v; }, removeItem: (k) => { delete storage[k]; },
     },
     fetch: async () => ({ ok: true, json: async () => ({ specs: [{ predicate: 'cat', direction: 'rising', usage: { prompt: 1, completion: 0, calls: 1, usdTicks: 0 } }] }) }),
-    Privacy: { current: async () => 'public', encrypt: async (text) => 'enc:v1:' + text, requireKey: async () => {}, decrypt: async (text) => text },
+    Privacy: { reset() {}, current: async () => 'public', encrypt: async (text) => 'enc:v1:' + text, requireKey: async () => {}, decrypt: async (text) => text },
     setTimeout() { return 1; }, clearTimeout() {},
     setInterval() { return 1; }, clearInterval() {},
     FormData: class { append() {} }, Date, Promise,
@@ -77,7 +77,7 @@ test('Watch starts a session in Convex, live queries drive the page, Stop ends i
   assert.equal(sent.watches[0].rule, 'enc:v1:cat arrives');
   assert.equal(sent.watches[0].predicate, 'enc:v1:cat');
   assert.equal(sent.subscriber, 'sub1');
-  assert.equal(p.storage['watcher.session'], 's1');
+  assert.equal(p.storage['watcher.session'], undefined);
 
   p.push('sessions:live', live([{ ...cat, state: true, evidence: 'a tabby on the sofa' }]));
   await p.settle();
@@ -124,27 +124,13 @@ test('Stop while the session is still being created stops the one that arrives l
   same(p.calls.at(-1), ['mutation', 'sessions:stop', { sessionId: 'late' }]);
 });
 
-test('a reload resumes an active session, forgets a stopped one, and obeys a remote stop', async () => {
-  const stored = { 'watcher.subscriber': 'sub1', 'watcher.session': 's1' };
-  const known = { 'subscribers:get': { linked: false } };
-
-  const gone = page({ stored, answers: { ...known, 'sessions:live': live([cat], 'stopped') } });
-  await gone.settle();
-  assert.equal(gone.run('session'), null);
-  assert.equal(gone.storage['watcher.session'], undefined);
-  assert.equal(gone.element('status').textContent, 'Session expired — start again.');
-
-  const p = page({ stored, answers: { ...known, 'sessions:live': live([cat]) } });
+test('reload ignores previous sessions and shared links', async () => {
+  const p = page({ stored: { 'watcher.session': 's1' }, search: '?session=s1' });
   await p.settle();
-  assert.equal(p.run('session.id'), 's1');
-  p.push('sessions:live', live([cat]));
-  assert.equal(p.run('session.watches[0].rule'), 'cat arrives');
-  // the sweep, or Stop in another tab: nothing to stop in Convex any more
-  p.push('sessions:live', live([cat], 'stopped'));
   assert.equal(p.run('session'), null);
-  assert.ok(!p.calls.some((c) => c[1] === 'sessions:stop'));
+  assert.equal(p.storage['watcher.session'], undefined);
+  assert.ok(!p.calls.some(c => c[1] === 'sessions:live'));
 });
-
 
 test('a failed live decryption releases the session, timers and subscriptions', async () => {
   const p = page({ answers: { 'subscribers:create': 'sub1', 'sessions:startEncrypted': { sessionId: 's1' } } });
@@ -169,11 +155,4 @@ test('remote legacy stop never promises saved encrypted history', async () => {
   p.run("adopt('legacy', Date.now())");
   p.push('sessions:live', live([cat], 'stopped'));
   assert.equal(p.element('status').textContent, 'Session expired — start again.');
-});
-
-test('imported history is sorted by timestamp instead of insertion order', async () => {
-  const p = page({ stored: { 'watcher.history': JSON.stringify({ newest: { startedAt: 30 }, oldest: { startedAt: 10 }, middle: { startedAt: 20 } }) } });
-  await p.settle();
-  p.run('showHistory()');
-  assert.deepEqual(p.element('historyList').children.map(o => o.value), ['', 'newest', 'middle', 'oldest']);
 });

@@ -4,8 +4,8 @@ New sessions started by the web page save rules, normalized predicates, evidence
 event text as encrypted envelopes in Convex. Existing sessions keep their legacy
 behavior; this change does not migrate or erase old plaintext or its backups.
 
-The browser generates an RSA-OAEP/SHA-256 key pair with Web Crypto and stores the
-private CryptoKey in IndexedDB. The public SPKI key identifies the recipient in
+The browser generates an RSA-OAEP/SHA-256 key pair with Web Crypto and keeps the
+non-exportable private CryptoKey only in page memory. The public SPKI key identifies the recipient in
 Convex. Each text field uses a fresh AES-256-GCM key and 96-bit random nonce; RSA
 wraps that AES key. The field name is authenticated as additional data. The
 versioned `enc:v1:` envelope contains only the wrapped key, nonce and ciphertext.
@@ -20,31 +20,24 @@ still see readable content; this is encrypted storage, not private inference.
 Browser decryption caches private keys in memory and up to 256 decrypted envelopes,
 keyed by recipient, field context and ciphertext. Failed decryptions are not retained.
 
-## User flow
+## Session lifecycle
 
-- Open **Encrypted history & recovery key** and choose **Download key**. Store the
-  recovery JSON privately: it contains an unencrypted private key.
-- Closing a regular browser tab does not delete the key. Clearing site data,
-  deleting the browser profile or ending an incognito session can delete it.
-- On another device, **Import key**, then choose a saved session. Imports add keys
-  without deleting existing keys. A mismatched public/private pair is rejected
-  before storage changes.
-- The recovery file includes known session IDs. Import also discovers the latest
-  100 sessions for that public key, including ones created after the export.
-  Older sessions remain accessible by their saved URL and matching key.
-- Stop and heartbeat expiry move protected sessions to `archived`, retaining encrypted text.
-  Cleanup scans only `stopped` sessions and upgrades older retained rows to `archived` as it encounters them.
-  Opening saved history does not restart that session. Watch starts a new one.
-  The history view uses the existing latest-50-events query. Snapshots remain
-  memory-only and disappear on reload.
-- Protected rule editing happens in the browser. Telegram displays placeholders
-  for stored protected content; live alerts still work when enabled.
+Keys are created automatically for each Watch. Stop, heartbeat expiry observed by
+this page, reload, and tab closure discard the private key and decryption cache.
+Restart generates a fresh pair. Hiding a tab pauses uploads but keeps the session.
+The page does not persist session IDs or resume old sessions, and exposes no key
+export, import, or saved-history controls. Legacy browser key storage is removed
+when the new page loads. Previously stored ciphertext remains in Convex but cannot
+be reopened with this UI. Already downloaded recovery files cannot be revoked.
+
+Stop and heartbeat expiry still archive encrypted rows in Convex; this change does
+not delete server records. Session results already rendered remain visible after
+Stop until the next Watch or page reload. Telegram live alerts remain readable.
 
 ## Limits
 
 This protects text in a database dump. It does not protect against malicious code
-in the browser, a compromised device, the model/compute provider, or someone holding
-the recovery file. The current application's session/subscriber capability IDs and
+in the browser, a compromised device, the model/compute provider, or someone who copied a private key from a previous version. The current application's session/subscriber capability IDs and
 public mutation permissions are unchanged: encryption does not add account-based
 authorization or prevent someone with IDs from stopping/removing data. Public-key
 encryption also does not authenticate an author. Metadata (time, state, IDs, public
@@ -62,9 +55,9 @@ node --test tests/test_web_client.js tests/test_dictation.js tests/test_encrypte
 node --test tests/test_privacy_browser.js
 ```
 
-Browser tests use real Web Crypto/IndexedDB and mocked Convex transport. They test
-tab closure, recovery in another browser context, Python-to-browser encryption,
-tampering, failed imports, and the actual page's save/reload/Stop/import flow.
+Browser tests use real Web Crypto and mocked Convex transport. They test
+non-exportable memory-only keys, tab closure, reload, Stop/restart, field-context
+validation, Python-to-browser encryption, and absence of recovery controls.
 Convex handler tests exercise encryption guards and retention without a deployment.
 
 Deploy the Python worker, Convex functions/schema, and frontend together. The worker

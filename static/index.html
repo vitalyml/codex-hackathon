@@ -24,10 +24,9 @@
           that answers all your rules in one go. Quiet frames are skipped before they cost anything.</li>
         <li><b>Get the moment.</b> When a rule flips &mdash; the cat <i>appears</i>, the door <i>opens</i> &mdash;
           it lands below with a snapshot. Scan the QR code and the same alert reaches your phone in Telegram,
-          where you can also take a snapshot. Edit protected rules here in the browser.</li>
+          where you can also take a snapshot. Edit rules here in the browser.</li>
       </ol>
-      <p class="note">The counters show elapsed time, tokens used and what the session has cost. Text history
-        is saved encrypted; camera snapshots stay in this tab. The worker and model see your rules during processing.</p>
+      <p class="note">The counters show elapsed time, tokens used and what the session has cost. Session results and camera snapshots are available in this tab until you reload or close it.</p>
     </details>
   </header>
 
@@ -83,17 +82,6 @@
   </section>
   </div>
 
-  <details class="primer">
-    <summary>Encrypted history &amp; recovery key</summary>
-    <p class="note">Your key stays in this browser after you close it. Download a backup before clearing browser data or switching devices. Anyone with the recovery file can read your saved sessions. Telegram alerts, when enabled, contain readable text.</p>
-    <div class="row">
-      <button id="exportKey" type="button" class="secondary">Download key</button>
-      <button id="importKey" type="button" class="secondary">Import key</button>
-      <input id="keyFile" type="file" accept="application/json,.json" hidden>
-    </div>
-    <label for="historyList">Saved sessions</label>
-    <select id="historyList"><option value="">Choose a saved session</option></select>
-  </details>
 </main>
 
 <dialog id="shotDialog" class="shot-dialog" aria-labelledby="shotCaption">

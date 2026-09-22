@@ -12,7 +12,9 @@ const notify = $('notify'), qrLink = $('qrLink'), qrImg = $('qrImg');
 const qrFallback = $('qrFallback'), qrBadge = $('qrBadge'), qrHint = $('qrHint');
 
 const SUB_KEY = 'watcher.subscriber'; // the token survives reloads, so one scan is enough
-const SESSION_KEY = 'watcher.session'; // so does the session: a reload resumes it
+// Sessions and their keys belong only to this page.
+localStorage.removeItem('watcher.session');
+history.replaceState(null, '', location.pathname);
 // The page may be served from another origin than the worker (Convex static hosting);
 // config.js says where the worker is. Empty means same origin, as under `make dev`.
 const WORKER = (window.WORKER_URL || '').replace(/\/+$/, ''); // paths start with '/'; '//session' is a 404
@@ -326,7 +328,6 @@ function rulesToStart() {
 
 async function start(rules) {
   if (startBtn.disabled) return;
-  archiveGeneration++;
   if (!rules.length) { say('Describe something that happens, then press Watch.', true); rule.focus(); return; }
   const attempt = ++generation;
   startBtn.disabled = true;
@@ -343,13 +344,13 @@ async function start(rules) {
   say(rules.length > 1 ? 'Understanding the rules…' : 'Understanding the rule…');
   let created;
   try {
+    Privacy.reset();
     const encryptionKey = await Privacy.current();
     const prepared = await prepareRules(rules, encryptionKey);
     if (attempt !== generation) return;
     created = await client.mutation('sessions:startEncrypted', { ...prepared, encryptionKey, subscriber: subscriber || undefined });
     if (created.sessionId) {
       created.encryptionKey = encryptionKey;
-      rememberHistory(created.sessionId, encryptionKey, Date.now());
     }
   } catch (e) {
     created = { error: 'convex', hint: e.message };
@@ -360,6 +361,7 @@ async function start(rules) {
   }
   startBtn.disabled = false;
   if (created.error) {
+    Privacy.reset();
     if (created.error === 'full') say('The room is full right now. Try again in a minute.', true);
     else say(created.hint || created.error, true);
     return;
@@ -367,12 +369,9 @@ async function start(rules) {
   adopt(created.sessionId, Date.now(), created.encryptionKey);
 }
 
-// A session this page runs: just started, or found again after a reload or by a shared link.
+// A session started by this page.
 function adopt(id, started, encryptionKey) {
   session = { id, watches: [], encryptionKey };
-  if (encryptionKey) { rememberHistory(id, encryptionKey, started); viewedKey = encryptionKey; }
-  localStorage.setItem(SESSION_KEY, id);
-  history.replaceState(null, '', `?session=${id}`);
   startBtn.hidden = true; stopBtn.hidden = false; restartBtn.hidden = false;
   pending = []; rule.value = '';
   startedAt = started; showElapsed(); clock = setInterval(showElapsed, 1000);
@@ -386,29 +385,9 @@ function adopt(id, started, encryptionKey) {
     client.onUpdate('events:list', { sessionId: id }, encryptedUpdate(current, decryptEvents, renderEvents)),
   ];
   const beat = () => client.mutation('presence:heartbeat', { sessionId: id }).catch(() => {});
-  beat(); // a resumed session may be seconds from the sweep: do not wait out the interval
+  beat(); // establish presence immediately
   heartbeat = setInterval(beat, HEARTBEAT_MS);
   tick();
-}
-
-// On load: `?session=` (a shared link) wins over what this browser remembers.
-async function resume() {
-  const id = new URLSearchParams(location.search).get('session') || localStorage.getItem(SESSION_KEY);
-  if (!id) return;
-  const view = await client.query('sessions:live', { sessionId: id });
-  if (view?.encryptionKey) await Privacy.requireKey(view.encryptionKey);
-  if (view && view.status === 'active') {
-    if (!session) adopt(id, view.startedAt, view.encryptionKey);
-    return;
-  }
-  if (view?.encryptionKey) { await openHistory(id); return; }
-  forget();
-  if (view) say('Session expired — start again.');
-}
-
-function forget() {
-  localStorage.removeItem(SESSION_KEY);
-  history.replaceState(null, '', location.pathname);
 }
 
 async function restart() {
@@ -428,7 +407,7 @@ function stop(message, keepCamera = false, gone = false) {
   const stopping = session && !gone ? client.mutation('sessions:stop', { sessionId: session.id }).catch(() => {}) : Promise.resolve();
   if (session) pending = session.watches.map((w) => w.rule); // the rules stay editable for the next Watch
   session = null;
-  forget();
+  Privacy.reset();
   if (!keepCamera) releaseCamera();
   startBtn.disabled = false; addBtn.disabled = false;
   startBtn.hidden = false; stopBtn.hidden = true; restartBtn.hidden = true;
@@ -454,9 +433,7 @@ function render(s) {
 function renderLive(view) {
   // Stopped by the sweep after a long sleep, from another tab, or deleted.
   if (!view || view.status !== 'active') {
-    const id = session.id;
-    stop(view?.encryptionKey ? 'Session stopped. Encrypted history is saved.' : 'Session expired — start again.', false, true);
-    if (view?.encryptionKey) openHistory(id).catch((e) => say(e.message, true));
+    stop('Session expired — start again.', false, true);
     return;
   }
   session.watches = view.watches; // Telegram may have edited the rules
@@ -534,28 +511,7 @@ function flash() { document.body.classList.add('flash'); setTimeout(() => docume
 let toastTimer;
 function showToast(text) { toast.textContent = text; toast.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => (toast.hidden = true), 4000); }
 
-// ---------- encrypted history ----------
-let viewedKey = null;
-let archiveGeneration = 0;
-const HISTORY_KEY = 'watcher.history';
-function historyEntries() { return JSON.parse(localStorage.getItem(HISTORY_KEY) || '{}'); }
-function rememberHistory(id, key, startedAt) {
-  const entries = historyEntries();
-  entries[id] = { key, startedAt };
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(entries));
-  showHistory();
-}
-function showHistory() {
-  const select = $('historyList');
-  select.innerHTML = '';
-  const empty = document.createElement('option');
-  empty.value = ''; empty.textContent = 'Choose a saved session'; select.append(empty);
-  for (const [id, entry] of Object.entries(historyEntries()).sort((a, b) => b[1].startedAt - a[1].startedAt)) {
-    const option = document.createElement('option');
-    option.value = id; option.textContent = new Date(entry.startedAt).toLocaleString();
-    select.append(option);
-  }
-}
+// ---------- session text ----------
 async function prepareRules(rules, publicKey, single = false) {
   if (!subscriber) await subscribe();
   const { specs } = await api('/normalize', {
@@ -594,60 +550,12 @@ function encryptedUpdate(current, decode, render) {
       if (session === current && n === sequence) render(clear);
     }).catch((e) => {
       if (session === current && n === sequence) {
-        stop(); // release subscriptions, heartbeat and camera; retain encrypted history
+        stop(); // release subscriptions, heartbeat, camera and keys
         say(e.message, true);
       }
     });
   };
 }
-async function openHistory(id) {
-  if (session) throw new Error('Stop the current watch before opening saved history.');
-  const attempt = ++archiveGeneration;
-  const view = await client.query('sessions:live', { sessionId: id });
-  if (!view) throw new Error('This session is no longer available.');
-  if (!view.encryptionKey) throw new Error('This session predates encrypted history.');
-  const clear = await decryptLive(view, view.encryptionKey);
-  const list = await decryptEvents(await client.query('events:list', { sessionId: id }), view.encryptionKey);
-  if (attempt !== archiveGeneration || session) return;
-  viewedKey = view.encryptionKey;
-  rememberHistory(id, viewedKey, view.startedAt);
-  pending = clear.watches.map((w) => w.rule); renderRules();
-  dropFrames(); lastEventId = null; renderEvents(list); renderUsage(view.usage);
-  evidence.textContent = clear.watches.map((w) => w.evidence).filter(Boolean).join(' · ') || '—';
-  history.replaceState(null, '', `?session=${id}`);
-  say('Saved history unlocked. Watch starts a new session with these rules.');
-}
-$('historyList').addEventListener('change', (e) => {
-  if (e.target.value) openHistory(e.target.value).catch((error) => say(error.message, true));
-});
-$('exportKey').addEventListener('click', async () => {
-  try {
-    const key = session?.encryptionKey || viewedKey || await Privacy.current();
-    const ids = Object.entries(historyEntries()).filter(([, e]) => e.key === key).map(([id]) => id);
-    const backup = await Privacy.exportBackup(key, ids);
-    const url = URL.createObjectURL(new Blob([backup], { type: 'application/json' }));
-    const link = document.createElement('a'); link.href = url; link.download = 'watcher-recovery.json'; link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    say('Recovery file downloaded. Keep it private: it unlocks your saved sessions.');
-  } catch (e) { say(e.message, true); }
-});
-$('importKey').addEventListener('click', () => $('keyFile').click());
-$('keyFile').addEventListener('change', async (e) => {
-  try {
-    const file = e.target.files[0];
-    if (!file) return;
-    if (file.size > 1000000) throw new Error('Recovery file is too large.');
-    const backup = await Privacy.importBackup(await file.text());
-    viewedKey = backup.publicKey;
-    for (const id of backup.sessions) rememberHistory(id, backup.publicKey, historyEntries()[id]?.startedAt || Date.now());
-    for (const entry of await client.query('sessions:history', { encryptionKey: backup.publicKey }))
-      rememberHistory(entry.id, backup.publicKey, entry.startedAt);
-    say('Recovery key imported. Choose a saved session to open it.');
-    if (!session) await resume();
-  } catch (error) { say(error.message || 'Invalid recovery file.', true); }
-  finally { e.target.value = ''; }
-});
-
 // ---------- wiring ----------
 // Watch is the submit button, so Enter in the box and the button do the same thing: start the
 // watch (list plus what's typed) until a session runs, then add to it. `+ Add` queues without starting.
@@ -668,9 +576,9 @@ document.addEventListener('visibilitychange', () => {
   clearTimeout(timer);
   tick();
 });
-// The session is not stopped here: a reload resumes it, and one that never comes back is
-// stopped by the sweep once its heartbeats end.
-window.addEventListener('pagehide', releaseCamera);
+// Stop locally even when the browser keeps this page in its back/forward cache.
+// If the request cannot finish during unload, heartbeat expiry stops the server session.
+window.addEventListener('pagehide', () => stop());
 // ---------- dictation ----------
 // Live speech-to-text for the rule box through OpenAI Realtime. The worker only mints a
 // one-minute key (/subscriber/<token>/stt-token); the microphone goes from this browser to
@@ -799,6 +707,5 @@ if (!client) {
   openCamera()
     .then(revealFlipIfMultiCamera)
     .catch((e) => say(`Camera unavailable: ${e.message}. Use https:// or localhost.`, true))
-    .then(() => { showHistory(); return resume(); })
     .catch((e) => say(e.message, true));
 }
