@@ -1,7 +1,8 @@
 import { v } from "convex/values";
 import { query } from "./_generated/server";
 
-/** The latest 50, oldest first. Takes a string for the same reason sessions:live does. */
+/** The latest 50, oldest first. Takes a string for the same reason sessions:live does.
+ * `callId` names the frame: the page that sent it still has it. */
 export const list = query({
   args: { sessionId: v.string() },
   returns: v.array(
@@ -10,7 +11,7 @@ export const list = query({
       at: v.number(),
       text: v.string(),
       rule: v.string(),
-      url: v.union(v.string(), v.null()),
+      callId: v.string(),
     }),
   ),
   handler: async (ctx, args) => {
@@ -21,14 +22,12 @@ export const list = query({
       .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
       .order("desc")
       .take(50);
-    return Promise.all(
-      latest.reverse().map(async (e) => ({
-        id: e._id,
-        at: e._creationTime,
-        text: e.text,
-        rule: e.rule,
-        url: await ctx.storage.getUrl(e.storageId),
-      })),
-    );
+    return latest.reverse().map((e) => ({
+      id: e._id,
+      at: e._creationTime,
+      text: e.text,
+      rule: e.rule,
+      callId: e.callId,
+    }));
   },
 });

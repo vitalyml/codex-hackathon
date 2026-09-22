@@ -54,9 +54,8 @@ async def main() -> None:
 
         # One answer for two rules, one of them edited away meanwhile: only the live
         # one is kept and alerted, and a retry of the same call says the same.
-        photo = await convex.upload(b"jpg")
         answer = {"state": True, "evidence": "seen"}
-        fired = {**answer, "event": {"text": "fired", "storageId": photo}}
+        fired = {**answer, "event": {"text": "fired"}}
         results = [
             {"watchId": first["id"], **fired},
             {"watchId": watches[0]["id"], **fired},
@@ -71,10 +70,9 @@ async def main() -> None:
         [event] = (await convex.query("worker:telegram", chatId=CHAT))["session"][
             "events"
         ]
-        args = {"eventId": event["id"]}
-        assert (await convex.query("worker:event", chatId=CHAT, **args))["url"]
-        assert await convex.query("worker:event", chatId=CHAT + 1, **args) is None
-        assert await convex.query("worker:event", chatId=CHAT, eventId="nope") is None
+        assert event["text"] == "fired", event
+        [listed] = await convex.query("events:list", sessionId=session)
+        assert listed["callId"] == "smoke", listed  # the page shows its own frame by it
 
         assert await convex.mutation("watches:remove", watchId=watches[1]["id"]) is None
         last = await convex.mutation("watches:remove", watchId=watches[0]["id"])
@@ -88,13 +86,13 @@ async def main() -> None:
         await convex.mutation("worker:unlink", chatId=CHAT)
         await convex.mutation("sessions:stop", sessionId=session)
     assert await convex.query("worker:telegram", chatId=CHAT) is None
-    # A stop schedules the deletion of the session with its photos.
+    # A stop schedules the deletion of the session with its events.
     for _ in range(20):
         if await convex.query("sessions:live", sessionId=session) is None:
             break
         await asyncio.sleep(0.5)
     assert await convex.query("sessions:live", sessionId=session) is None
-    assert await convex.query("worker:event", chatId=CHAT, **args) is None
+    assert await convex.query("events:list", sessionId=session) == []
     await convex.aclose()
     print("convex smoke: ok")  # a script's result, not application logging
 

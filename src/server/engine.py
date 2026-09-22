@@ -28,11 +28,14 @@ SAVE_ATTEMPTS = 3
 SAVE_BACKOFF = 1.0  # seconds, times the attempt number
 
 
-def _status(feed: Feed, gate: GateResult, sent: bool) -> dict:
+def _status(feed: Feed, gate: GateResult, call_id: Optional[str]) -> dict:
+    """`callId` names the model call this frame started, if any: an event carries the
+    same id, so the page can show the frame it kept next to the event."""
     return {
         "gate": gate.verdict,
         "streak": gate.streak,
-        "sent": sent,
+        "sent": call_id is not None,
+        "callId": call_id,
         "busy": feed.busy,
         "closed": feed.closed,
     }
@@ -68,18 +71,20 @@ async def handle_frame(
             f"skipped: {skip}" if skip else "-> model",
         )
         if skip:
-            return _status(feed, gate, sent=False)
+            return _status(feed, gate, None)
         feed.retry = False
         feed.busy = True
+        call_id = secrets.token_hex(8)
         feed.task = asyncio.create_task(
-            perceive(feed, session_id, jpeg, perception, convex, notifier)
+            perceive(feed, session_id, call_id, jpeg, perception, convex, notifier)
         )
-        return _status(feed, gate, sent=True)
+        return _status(feed, gate, call_id)
 
 
 async def perceive(
     feed: Feed,
     session_id: str,
+    call_id: str,
     jpeg: bytes,
     perception: Perception,
     convex: Convex,
@@ -87,7 +92,7 @@ async def perceive(
 ) -> None:
     """Background: ask the model, update the trackers, record the answer. Never raises."""
     try:
-        await _observe(feed, session_id, jpeg, perception, convex, notifier)
+        await _observe(feed, session_id, call_id, jpeg, perception, convex, notifier)
     except (PerceptionError, ConvexError) as e:
         # Not resubmitted: the next frame makes a fresh model call, so a record that
         # committed but whose response was lost cannot be applied twice.
@@ -113,6 +118,7 @@ async def _notify(
 async def _observe(
     feed: Feed,
     session_id: str,
+    call_id: str,
     jpeg: bytes,
     perception: Perception,
     convex: Convex,
@@ -146,15 +152,10 @@ async def _observe(
         fired.append((w["id"], watch, text))
     # The next frame may no longer show what the model just saw, so a failed save is
     # retried with this very answer; callId keeps a repeat from being recorded twice.
-    call_id, storage_id = secrets.token_hex(8), None
+    # The frame itself is never stored: it goes to Telegram from memory, and the page
+    # that sent it keeps its own copy.
     for attempt in range(1, SAVE_ATTEMPTS + 1):
         try:
-            if fired and storage_id is None:
-                # one photo per frame, shared by every event of that frame
-                storage_id = await convex.upload(jpeg)
-                for result in results:
-                    if "event" in result:
-                        result["event"]["storageId"] = storage_id
             recorded = await convex.mutation(
                 "worker:record",
                 sessionId=session_id,

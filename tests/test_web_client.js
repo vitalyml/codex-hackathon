@@ -46,6 +46,7 @@ function page({ stored = {}, search = '', answers = {} } = {}) {
     setTimeout() { return 1; }, clearTimeout() {},
     setInterval() { return 1; }, clearInterval() {},
     FormData: class { append() {} }, Date, Promise,
+    URL: { createObjectURL: () => 'blob:frame', revokeObjectURL() {} },
   });
   element('video').readyState = 1;
   element('video').videoWidth = 1280; element('video').videoHeight = 720;
@@ -77,12 +78,15 @@ test('Watch starts a session in Convex, live queries drive the page, Stop ends i
   assert.equal(p.element('usage').textContent, '730');
   assert.equal(p.element('cost').textContent, '$0.0021');
 
-  const event = { id: 'e1', at: Date.now(), text: 'a cat is visible - became true', rule: 'cat arrives', url: 'https://x/p.jpg' };
+  const event = { id: 'e1', at: Date.now(), text: 'a cat is visible - became true', rule: 'cat arrives', callId: 'c1' };
   p.push('events:list', [event]); // what was there when the page subscribed is history, not news
   assert.equal(p.element('toast').textContent, '');
-  p.push('events:list', [event, { ...event, id: 'e2', text: 'again' }]);
+  p.run("keepFrame('c2', {})"); // the frame that started call c2 stays in this tab only
+  p.push('events:list', [event, { ...event, id: 'e2', text: 'again', callId: 'c2' }]);
   assert.equal(p.element('toast').textContent, 'Event! again');
-  assert.equal(p.element('events').children.length, 2);
+  const [newest, older] = p.element('events').children;
+  assert.equal(newest.children.length, 2); // the photo, then the caption
+  assert.equal(older.children.length, 1);  // no frame for c1: caption only
 
   await p.run('stop()');
   same(p.calls.at(-1), ['mutation', 'sessions:stop', { sessionId: 's1' }]);

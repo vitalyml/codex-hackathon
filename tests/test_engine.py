@@ -31,7 +31,7 @@ class Answers:
         return Detection([Observation(state, "seen") for state in answer])
 
 
-async def test_watches_share_a_call_and_a_photo_and_state_survives_the_worker():
+async def test_watches_share_a_call_and_state_survives_the_worker():
     convex = FakeConvex()
     convex.add("s", ("cat arrives", "cat", "rising"), ("door opens", "door", "rising"))
     model = Answers([True, True], [True, True], [False, True])
@@ -42,13 +42,14 @@ async def test_watches_share_a_call_and_a_photo_and_state_survives_the_worker():
             sent.append((watch.rule, event.text, event.image == image()))
 
     feed = Feed()
-    assert (await handle_frame(feed, "s", image(), model, convex, Spy()))["sent"]
+    status = await handle_frame(feed, "s", image(), model, convex, Spy())
+    assert status["sent"] and status["callId"]
     await feed.task
     await asyncio.gather(*feed.notifications)
-    # both rules fired on one frame: one model call, one upload, two events
+    # both rules fired on one frame: one model call, two events naming it; the frame
+    # itself is never uploaded, the page and Telegram get it from memory
     assert [e["rule"] for e in convex.events] == ["cat arrives", "door opens"]
-    assert convex.photos == [image()]
-    assert {e["storageId"] for e in convex.events} == {"photo1"}
+    assert {e["callId"] for e in convex.events} == {status["callId"]}
     assert sent == [
         ("cat arrives", "cat - became true", True),
         ("door opens", "door - became true", True),
@@ -142,7 +143,6 @@ async def test_a_lost_response_is_retried_without_recording_the_answer_twice(
     await feed.task
     assert not feed.retry  # saved on the third attempt: no second model call needed
     assert len(convex.events) == 1 and len(convex.usage) == 1
-    assert len(convex.photos) == 1  # the photo is uploaded once, not per attempt
 
 
 async def test_a_rule_dropped_while_the_model_thinks_gets_no_alert(monkeypatch):

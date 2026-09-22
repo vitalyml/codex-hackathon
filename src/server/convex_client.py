@@ -44,24 +44,3 @@ class Convex:
 
     async def mutation(self, path: str, **args: Any) -> Any:
         return await self._call("mutation", path, args)
-
-    async def upload(self, jpeg: bytes) -> str:
-        """Store an event photo; returns the storageId for worker:record."""
-        url = await self.mutation("worker:uploadUrl")
-        try:
-            response = await self.client.post(
-                url, content=jpeg, headers={"content-type": "image/jpeg"}
-            )
-            response.raise_for_status()
-            return str(response.json()["storageId"])
-        except (httpx.HTTPError, ValueError, KeyError) as e:
-            raise ConvexError(f"upload: {e}") from e
-
-    async def download(self, url: str) -> bytes:
-        """An event photo by the URL a query returned (Telegram shows it on request)."""
-        try:
-            response = await self.client.get(url)
-            response.raise_for_status()
-            return response.content
-        except httpx.HTTPError as e:
-            raise ConvexError(f"download: {e}") from e

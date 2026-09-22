@@ -29,18 +29,6 @@ async def test_secret_goes_to_the_worker_tier_only():
     assert seen[1][1]["args"] == {"sessionId": "abc", "secret": "s3cret"}
 
 
-async def test_upload_returns_the_storage_id():
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/mutation":
-            return httpx.Response(
-                200, json={"status": "success", "value": "https://x.convex.cloud/up"}
-            )
-        assert request.content == b"jpeg" and request.url.path == "/up"
-        return httpx.Response(200, json={"storageId": "kg2"})
-
-    assert await convex(handler).upload(b"jpeg") == "kg2"
-
-
 async def test_failures_raise_convex_error():
     def failed(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -51,6 +39,6 @@ async def test_failures_raise_convex_error():
         raise httpx.ConnectError("no route")
 
     with pytest.raises(ConvexError, match="forbidden"):
-        await convex(failed).mutation("worker:uploadUrl")
+        await convex(failed).mutation("worker:record")
     with pytest.raises(ConvexError, match="no route"):
         await convex(down).query("sessions:live", sessionId="abc")

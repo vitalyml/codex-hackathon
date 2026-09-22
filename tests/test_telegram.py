@@ -21,7 +21,6 @@ class FakeConvex:
     def __init__(self) -> None:
         self.subscribers = {TOKEN: {"chatId": None, "muted": False}}
         self.session: dict | None = None  # the active session of TOKEN
-        self.saved: list[dict] = []  # every event of the session
         self.billed = 0
         self.ids = 0
 
@@ -42,9 +41,6 @@ class FakeConvex:
             (s for s in self.subscribers.values() if s["chatId"] == args["chatId"]),
             None,
         )
-        if path == "worker:event":  # by id among every saved event, not the listed five
-            saved = self.saved if sub and self.session else []
-            return next((e for e in saved if e["id"] == args["eventId"]), None)
         assert path == "worker:telegram", path
         # a snapshot, like a real query result
         return sub and {"muted": sub["muted"], "session": copy.deepcopy(self.session)}
@@ -88,9 +84,6 @@ class FakeConvex:
         else:
             raise AssertionError(path)
         return None
-
-    async def download(self, url: str) -> bytes:
-        return url.encode()
 
 
 def make_bot(calls: list) -> Bot:
@@ -260,20 +253,20 @@ async def test_snapshot_waits_for_a_fresh_frame_and_never_sends_a_stale_one(
     assert "15:00:01 UTC" in bot.send_photo.call_args.args[2]
 
 
-async def test_menu_edits_the_message_and_event_photos_are_scoped_to_the_chat():
+async def test_menu_edits_the_message_and_recent_events_are_text_only():
     bot = AsyncMock()
     tg, convex = connected(bot)
-    # e1 is saved but no longer among the listed five: its button must still work
-    convex.saved = [dict(id="e1", at=1789223530000, text="<cat>", rule="", url="jpg")]
     update = press("menu")
     update["callback_query"]["message"].update(message_id=10, text="Dashboard")
     await respond(tg, update)
     bot.edit_message.assert_awaited_once()
     bot.send_message.assert_not_awaited()
-    r = await handle(tg, press("event:e1"))
-    assert r.image == b"jpg" and "&lt;cat&gt;" in r.text
-    assert (await handle(tg, press("event:other"))).image is None
-    assert (await handle(tg, press("event:e1", 99))).image is None  # another chat
+    # No photo is stored anywhere: the list names the moments, the alerts had the frames.
+    convex.session["events"] = [
+        dict(id="e1", n=0, at=1789223530000, text="<cat>", rule="")
+    ]
+    r = await handle(tg, press("events"))
+    assert r.image is None and "&lt;cat&gt;" in r.text and r.buttons == notifier.BACK
 
 
 async def test_edit_message_handles_unchanged_screen_but_preserves_api_errors():

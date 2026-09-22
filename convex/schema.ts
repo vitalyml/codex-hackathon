@@ -38,7 +38,9 @@ export default defineSchema({
     watchId: v.id("watches"),
     text: v.string(),
     rule: v.string(),
-    storageId: v.id("_storage"),
+    // The model call that fired it: the page keeps that frame in memory and shows it
+    // next to the event. No photo is stored: the frame is the user's camera.
+    callId: v.string(),
   }).index("by_session", ["sessionId"]),
 
   // A browser that may ask for Telegram alerts. Its id is the token the page keeps.

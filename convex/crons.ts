@@ -29,18 +29,16 @@ export const keepAlive = internalAction({
 });
 
 /** A stop is final: the session goes `stopped` and its deletion is scheduled at once.
- * Photos are the user's camera and live only as long as the session. */
+ * What the model saw is the user's camera and lives only as long as the session. */
 export async function stopSession(ctx: MutationCtx, sessionId: Id<"sessions">) {
   await ctx.db.patch(sessionId, { status: "stopped" });
   await ctx.scheduler.runAfter(0, internal.crons.cleanup, { resume: sessionId });
 }
 
-/** Deletes stopped sessions with their events and photos, one session at a time. One
- * bounded batch per run, then it schedules itself: a session with thousands of events
- * must not hit the transaction limits. A session once started is finished (`resume`):
- * events of one frame share a photo, and a half-deleted session would keep events
- * without theirs. Scheduled by `stopSession`; the hourly cron catches anything that
- * schedule missed. */
+/** Deletes stopped sessions with their events, one session at a time. One bounded batch
+ * per run, then it schedules itself: a session with thousands of events must not hit the
+ * transaction limits. A session once started is finished (`resume`). Scheduled by
+ * `stopSession`; the hourly cron catches anything that schedule missed. */
 export const cleanup = internalMutation({
   args: { resume: v.optional(v.id("sessions")) },
   returns: v.null(),
@@ -59,12 +57,7 @@ export const cleanup = internalMutation({
         .query(table)
         .withIndex("by_session", (q) => q.eq("sessionId", sessionId));
     const events = await owned("events").take(BATCH);
-    for (const event of events) {
-      // Events of one frame share a photo: it may be gone already.
-      if (await ctx.db.system.get(event.storageId))
-        await ctx.storage.delete(event.storageId);
-      await ctx.db.delete(event._id);
-    }
+    for (const event of events) await ctx.db.delete(event._id);
     const done = events.length < BATCH;
     if (done) {
       for (const table of ["watches", "presence"] as const)

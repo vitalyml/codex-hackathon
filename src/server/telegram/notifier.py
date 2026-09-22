@@ -299,47 +299,19 @@ async def handle(tg: Telegram, update: dict) -> Optional[Reply]:
             )
     elif command == "events":
         if session is None or not session["events"]:
-            result.text = "🗂 <b>The best moments go here</b>\n\nNo events yet. When your rule triggers, you'll find the photo and time here."
+            result.text = "🗂 <b>The best moments go here</b>\n\nNo events yet. When your rule triggers, you'll find it here with its time."
             result.buttons = BACK
         else:
             recent = session["events"]  # the latest five, newest first
+            # Text only: the photo was sent when the event fired and is nowhere else.
             result.text = (
-                "🗂 <b>RECENT MOMENTS</b>\n<i>Latest five events · tap to see the photo</i>\n\n"
+                "🗂 <b>RECENT MOMENTS</b>\n<i>Latest five events · the photos are in the alerts above</i>\n\n"
                 + "\n\n".join(
                     f"<b>{e['n'] + 1:02d}</b> · {_at(e['at'])[11:19]} UTC\n{safe(e['rule'] or e['text'], 180)}"
                     for e in recent
                 )
             )
-            result.buttons = [
-                [
-                    (
-                        f"📷 Event {e['n'] + 1:02d} · {_at(e['at'])[11:19]}",
-                        f"event:{e['id']}",
-                    )
-                ]
-                for e in recent
-            ] + BACK
-    elif command.startswith("event:"):
-        # Read by id, not from the latest five: newer events push a button's one out of
-        # that list. Convex answers only for this chat's own events.
-        event = await tg.convex.query(
-            "worker:event", chatId=chat_id, eventId=command.partition(":")[2]
-        )
-        if event is None or not event["url"]:
-            result.text = "⌛ <b>This moment is no longer available</b>\nOpen Recent events to see this watch's moments."
-        else:
-            at = _at(event["at"])
-            result.image = await tg.convex.download(event["url"])
-            result.text = (
-                "🗂 <b>MOMENT</b>\n\n"
-                + (
-                    f"<blockquote>{safe(event['rule'], 250)}</blockquote>\n"
-                    if event["rule"]
-                    else ""
-                )
-                + f"{safe(event['text'], 650)}\n\n<i>{at[:10]} · {at[11:19]} UTC</i>"
-            )
-            result.buttons = [[("‹ Recent events", "events"), ("Dashboard", "menu")]]
+            result.buttons = BACK
     elif command == "snapshot":
         result.text = (
             NO_WATCH if session is None else "📸 <b>Waiting for a fresh frame…</b>"

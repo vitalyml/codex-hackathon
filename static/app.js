@@ -26,6 +26,18 @@ let generation = 0;
 let unsubscribe = []; // live queries of the running session
 let heartbeat = null;
 let lastEventId = null; // null until the first event list arrives: history is not news
+// Frames that went to the model, by the call id the worker answered with. Nothing stores
+// a photo: an event names its call, and this tab is the only place that frame still is.
+const frames = new Map(); // callId -> object URL
+const KEEP_FRAMES = 50;   // as many as events:list shows
+function keepFrame(callId, jpeg) {
+  frames.set(callId, URL.createObjectURL(jpeg));
+  while (frames.size > KEEP_FRAMES) {
+    const [oldest] = frames.keys();
+    URL.revokeObjectURL(frames.get(oldest)); frames.delete(oldest);
+  }
+}
+function dropFrames() { for (const url of frames.values()) URL.revokeObjectURL(url); frames.clear(); }
 let force = false;      // the rules changed: the next frame asks the model even if nothing moves
 let startedAt = 0, clock = null;
 function showElapsed() {
@@ -198,6 +210,7 @@ async function tick() {
     fd.append('frame', jpeg, 'frame.jpg');
     const forced = force;
     const s = await api(`/session/${currentSession.id}/frame${forced ? '?force=1' : ''}`, { method: 'POST', body: fd });
+    if (s.callId) keepFrame(s.callId, jpeg);
     if (forced && s.sent) force = false;
     // Concurrent uploads can resolve out of order — drop a response older than
     // the newest one already rendered.
@@ -341,7 +354,7 @@ function adopt(id, started) {
   startBtn.hidden = true; stopBtn.hidden = false; restartBtn.hidden = false;
   pending = []; rule.value = '';
   startedAt = started; showElapsed(); clock = setInterval(showElapsed, 1000);
-  events.innerHTML = ''; lastEventId = null; evidence.textContent = '—';
+  events.innerHTML = ''; lastEventId = null; evidence.textContent = '—'; dropFrames();
   outstanding = 0; uploadSeq = 0; lastRenderedSeq = -1; force = false;
   setPill(statePill, 'unknown', 'idle');
   say('Watching.');
@@ -446,25 +459,29 @@ function renderEvents(list) {
   for (const e of [...list].reverse()) {
     const li = document.createElement('li');
     const at = new Date(e.at).toLocaleTimeString();
-    // The thumbnail is a button: the stored frame is 640px wide, so the dialog shows
-    // it several times larger than the list ever can.
-    const shot = document.createElement('button');
-    shot.type = 'button';
-    shot.className = 'shot';
-    shot.setAttribute('aria-label', `Open larger view: ${e.text}, ${at}`);
-    const img = document.createElement('img');
-    img.src = e.url || '';
-    img.alt = e.text;
-    img.loading = 'lazy';
-    shot.append(img);
-    shot.addEventListener('click', () => openShot(e.url, e.text, at));
+    const src = frames.get(e.callId); // missing after a reload or in another tab
     const cap = document.createElement('div');
+    if (src) {
+      // The thumbnail is a button: the frame is 640px wide, so the dialog shows it
+      // several times larger than the list ever can.
+      const shot = document.createElement('button');
+      shot.type = 'button';
+      shot.className = 'shot';
+      shot.setAttribute('aria-label', `Open larger view: ${e.text}, ${at}`);
+      const img = document.createElement('img');
+      img.src = src;
+      img.alt = e.text;
+      img.loading = 'lazy';
+      shot.append(img);
+      shot.addEventListener('click', () => openShot(src, e.text, at));
+      li.append(shot);
+    }
     const b = document.createElement('b');
     b.textContent = e.rule ? `${e.rule} — ${e.text}` : e.text;
     const time = document.createElement('time');
     time.textContent = at;
     cap.append(b, time);
-    li.append(shot, cap);
+    li.append(cap);
     events.append(li);
   }
 }

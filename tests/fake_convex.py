@@ -11,7 +11,6 @@ class FakeConvex:
         self.sessions: dict[str, dict] = {}
         self.subscribers: dict[str, dict] = {}  # token -> subscribers:get view
         self.events: list[dict] = []
-        self.photos: list[bytes] = []
         self.usage: list[dict] = []
         self.chat_id = None
         self.down = False
@@ -44,10 +43,6 @@ class FakeConvex:
         assert path == "sessions:live", path
         return copy.deepcopy(self.sessions.get(args["sessionId"]))
 
-    async def upload(self, jpeg: bytes) -> str:
-        self.photos.append(jpeg)
-        return f"photo{len(self.photos)}"
-
     async def mutation(self, path: str, **args):
         assert path == "worker:record", path
         if self.down:
@@ -64,7 +59,9 @@ class FakeConvex:
                 continue
             watch.update(state=r["state"], evidence=r["evidence"])
             if "event" in r:
-                self.events.append({"rule": watch["rule"], **r["event"]})
+                self.events.append(
+                    {"rule": watch["rule"], "callId": args["callId"], **r["event"]}
+                )
                 kept.append(watch["id"])
         if self.lose_responses:
             self.lose_responses -= 1

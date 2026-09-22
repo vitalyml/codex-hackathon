@@ -53,8 +53,12 @@ code; no Firecrawl, no AgentMail.
 4. **Live updates replace SSE.** The page subscribes to Convex queries (`sessions:live`,
    `events:list`, `subscribers:get`). SSE also kept a paused session alive; that role moves
    to a 20 s heartbeat mutation plus a cron sweep.
-5. **Event photos go to Convex file storage** (rare, about 50–100 KB each). The frame
-   stream and the last frame do not.
+5. **No frame is ever stored.** (Until 2026-09-22 event photos went to Convex file
+   storage.) The frame is the user's camera: it lives in the worker's memory for one
+   model call, goes to Telegram from there when an event fires, and the page that sent it
+   keeps its own copy. An event records the `callId` of the model call that fired it, and
+   the page shows the frame it kept under that id; after a reload, or in another tab, the
+   event is text only.
 6. **The tracker is unchanged.** Per model call it is rebuilt from the stored state:
    `Tracker(direction)`, `state = watch.state`, then `update(observation)`. With
    `persist=1`, the only production setting, the confirmed state is the whole tracker state.
@@ -72,7 +76,7 @@ code; no Firecrawl, no AgentMail.
 
 Tables: `sessions` (status `active|stopped`, subscriberId, usage), `watches`
 (sessionId, order, rule, predicate, direction, state, evidence), `events` (sessionId,
-watchId, text, rule, storageId), `subscribers` (chatId, muted, lastSeen), `presence`
+watchId, text, rule, callId), `subscribers` (chatId, muted, lastSeen), `presence`
 (sessionId, lastSeen; separate so heartbeats do not invalidate `sessions:live`, which is
 also why `sessions` has no `lastSeen` of its own).
 
@@ -112,11 +116,12 @@ also why `sessions` has no `lastSeen` of its own).
 14. **A session goes `stopped` after 180 s without a heartbeat**, and that is final.
     Background tabs throttle timers to about once a minute, so a shorter limit would kill
     hidden tabs.
-15. **Events and photos live only as long as the session.** Photos are the user's camera,
-    so a stop (explicit, or by the sweep) schedules the deletion of the session with its
-    events, photos, watches and presence at once, in batches of 500 events. An hourly
-    cron deletes any stopped session that schedule missed. (Until 2026-09-22 stopped
-    sessions were kept until the end of the hackathon, bounded by a 5,000-event quota.)
+15. **A session's data lives only as long as the session.** What the model saw is the
+    user's camera, so a stop (explicit, or by the sweep) schedules the deletion of the
+    session with its events, watches and presence at once, in batches of 500 events. An
+    hourly cron deletes any stopped session that schedule missed. (Until 2026-09-22
+    stopped sessions were kept until the end of the hackathon, bounded by a 5,000-event
+    quota.)
 16. **Free use is limited to 10 minutes**, counted from the creation time of the
     *subscriber* (the token the browser gets on first load), so Stop → Start does not reset
     it. After the limit the worker is told the session is closed and stops calling the
@@ -248,8 +253,7 @@ into `master`, the demo video and the submission.
 
 - Two deploy targets and three sets of environment variables (Convex, worker, page build)
   instead of one service.
-- Each model call adds two network round trips to Convex (three when an event photo is
-  uploaded). A photo uploaded for a `record` that never happens is orphaned in storage.
+- Each model call adds two network round trips to Convex.
 - The 10-minute limit and all public functions rest on unguessable ids; without accounts
   any limit can be reset by clearing browser storage.
 - The cost counter becomes an estimate, and each model call costs about four times more.
