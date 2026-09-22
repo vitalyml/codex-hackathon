@@ -200,9 +200,7 @@ class OpenAIPerception:
                     OPENAI_ATTEMPT_TIMEOUT,
                 )
                 if response.status_code in (429, 500, 502, 503):
-                    last = PerceptionError(
-                        f"openai {response.status_code}: {response.text[:120]}"
-                    )
+                    last = PerceptionError(f"openai {response.status_code}")
                     self._failover(last)
                     continue
                 response.raise_for_status()

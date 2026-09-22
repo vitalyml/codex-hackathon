@@ -12,6 +12,7 @@ import httpx
 from fastapi import (
     FastAPI,
     File,
+    Form,
     Header,
     HTTPException,
     Path,
@@ -39,6 +40,10 @@ STATIC = FilePath(__file__).resolve().parents[2] / "static"
 
 class Rules(BaseModel):
     rules: list[str]
+
+
+class BrowserRules(Rules):
+    subscriber: str
 
 
 def create_app(
@@ -103,21 +108,17 @@ def create_app(
     async def health():
         return {"ok": True, "feeds": len(feeds)}
 
-    @app.post("/internal/normalize")
-    async def normalize(body: Rules, authorization: str = Header("")):
-        """For the Convex actions sessions:start and watches:add; convex/lib.ts is the caller."""
-        expected = f"Bearer {config.WORKER_SECRET}"
-        if not config.WORKER_SECRET or not secrets.compare_digest(
-            authorization.encode(), expected.encode()
+    async def _normalize(rules: list[str]):
+        if not 0 < len(rules) <= config.MAX_WATCHES or any(
+            not r.strip() or len(r) > 4000 for r in rules
         ):
-            raise HTTPException(401, "bad worker secret")
-        if not 0 < len(body.rules) <= config.MAX_WATCHES:
-            raise HTTPException(400, "1..MAX_WATCHES rules")
+            raise HTTPException(400, "invalid rules")
         try:
-            specs = await asyncio.gather(*(perception.normalize(r) for r in body.rules))
-        except PerceptionError as e:
+            specs = await asyncio.gather(*(perception.normalize(r) for r in rules))
+        except PerceptionError:
             return JSONResponse(
-                {"error": "perception", "hint": str(e)}, status_code=502
+                {"error": "perception", "hint": "could not understand the rules"},
+                status_code=502,
             )
         return {
             "specs": [
@@ -130,10 +131,47 @@ def create_app(
             ]
         }
 
+    @app.post("/internal/normalize")
+    async def normalize(body: Rules, authorization: str = Header("")):
+        """For the Convex actions sessions:start and watches:add; convex/lib.ts is the caller."""
+        expected = f"Bearer {config.WORKER_SECRET}"
+        if not config.WORKER_SECRET or not secrets.compare_digest(
+            authorization.encode(), expected.encode()
+        ):
+            raise HTTPException(401, "bad worker secret")
+        return await _normalize(body.rules)
+
+    @app.post("/normalize")
+    async def browser_normalize(body: BrowserRules):
+        # The prompt goes straight to compute, never into a Convex action argument.
+        if not await convex.query("subscribers:get", token=body.subscriber):
+            raise HTTPException(404, "no such subscriber")
+        return await _normalize(body.rules)
+
     @app.post("/session/{session_id}/frame")
     async def frame(
-        session_id: str, force: bool = False, frame: UploadFile = File(...)
+        session_id: str,
+        force: bool = False,
+        frame: UploadFile = File(...),
+        watches: Optional[str] = Form(None),
     ):
+        clear_watches = None
+        if watches is not None:
+            try:
+                clear_watches = json.loads(watches)
+                if (
+                    not isinstance(clear_watches, list)
+                    or not 0 < len(clear_watches) <= config.MAX_WATCHES
+                ):
+                    raise ValueError()
+                for w in clear_watches:
+                    if not isinstance(w, dict) or any(
+                        not isinstance(w.get(k), str) or len(w[k]) > 16000
+                        for k in ("id", "rule", "predicate")
+                    ):
+                        raise ValueError()
+            except (ValueError, TypeError):
+                raise HTTPException(400, "invalid rules")
         feed = feeds.get(session_id)
         if feed is None:
             # First frame, or the first after a restart or a long pause. Asking Convex
@@ -155,6 +193,7 @@ def create_app(
                 convex,
                 notifier,
                 force,
+                clear_watches,
             )
         except ValueError:
             raise HTTPException(400, "not a decodable image")

@@ -215,6 +215,10 @@ async function tick() {
     const jpeg = await grabJpeg();
     if (session !== currentSession) return;
     fd.append('frame', jpeg, 'frame.jpg');
+    if (currentSession.encryptionKey) {
+      if (!currentSession.watches.length) return;
+      fd.append('watches', JSON.stringify(currentSession.watches.map(({ id, rule, predicate }) => ({ id, rule, predicate }))));
+    }
     const forced = force;
     const s = await api(`/session/${currentSession.id}/frame${forced ? '?force=1' : ''}`, { method: 'POST', body: fd });
     if (s.callId) keepFrame(s.callId, jpeg);
@@ -282,7 +286,9 @@ async function addRule() {
   const currentSession = session;
   say('Understanding the rule…');
   try {
-    const failed = await client.action('watches:add', { sessionId: currentSession.id, rule: text });
+    const failed = currentSession.encryptionKey
+      ? await client.mutation('watches:addEncrypted', { sessionId: currentSession.id, ...(await prepareRules([text], currentSession.encryptionKey, true)) })
+      : await client.action('watches:add', { sessionId: currentSession.id, rule: text });
     if (session !== currentSession) return;
     if (failed) { say(failed.hint || failed.error, true); return; }
     rule.value = '';
@@ -320,6 +326,7 @@ function rulesToStart() {
 
 async function start(rules) {
   if (startBtn.disabled) return;
+  archiveGeneration++;
   if (!rules.length) { say('Describe something that happens, then press Watch.', true); rule.focus(); return; }
   const attempt = ++generation;
   startBtn.disabled = true;
@@ -336,7 +343,14 @@ async function start(rules) {
   say(rules.length > 1 ? 'Understanding the rules…' : 'Understanding the rule…');
   let created;
   try {
-    created = await client.action('sessions:start', { rules, subscriber: subscriber || undefined });
+    const encryptionKey = await Privacy.current();
+    const prepared = await prepareRules(rules, encryptionKey);
+    if (attempt !== generation) return;
+    created = await client.mutation('sessions:startEncrypted', { ...prepared, encryptionKey, subscriber: subscriber || undefined });
+    if (created.sessionId) {
+      created.encryptionKey = encryptionKey;
+      rememberHistory(created.sessionId, encryptionKey, Date.now());
+    }
   } catch (e) {
     created = { error: 'convex', hint: e.message };
   }
@@ -350,12 +364,13 @@ async function start(rules) {
     else say(created.hint || created.error, true);
     return;
   }
-  adopt(created.sessionId, Date.now());
+  adopt(created.sessionId, Date.now(), created.encryptionKey);
 }
 
 // A session this page runs: just started, or found again after a reload or by a shared link.
-function adopt(id, started) {
-  session = { id, watches: [] };
+function adopt(id, started, encryptionKey) {
+  session = { id, watches: [], encryptionKey };
+  if (encryptionKey) { rememberHistory(id, encryptionKey, started); viewedKey = encryptionKey; }
   localStorage.setItem(SESSION_KEY, id);
   history.replaceState(null, '', `?session=${id}`);
   startBtn.hidden = true; stopBtn.hidden = false; restartBtn.hidden = false;
@@ -366,10 +381,9 @@ function adopt(id, started) {
   setPill(statePill, 'unknown', 'idle');
   say('Watching.');
   const current = session;
-  const mine = (render) => (value) => { if (session === current) render(value); };
   unsubscribe = [
-    client.onUpdate('sessions:live', { sessionId: id }, mine(renderLive)),
-    client.onUpdate('events:list', { sessionId: id }, mine(renderEvents)),
+    client.onUpdate('sessions:live', { sessionId: id }, encryptedUpdate(current, decryptLive, renderLive)),
+    client.onUpdate('events:list', { sessionId: id }, encryptedUpdate(current, decryptEvents, renderEvents)),
   ];
   const beat = () => client.mutation('presence:heartbeat', { sessionId: id }).catch(() => {});
   beat(); // a resumed session may be seconds from the sweep: do not wait out the interval
@@ -382,10 +396,12 @@ async function resume() {
   const id = new URLSearchParams(location.search).get('session') || localStorage.getItem(SESSION_KEY);
   if (!id) return;
   const view = await client.query('sessions:live', { sessionId: id });
+  if (view?.encryptionKey) await Privacy.requireKey(view.encryptionKey);
   if (view && view.status === 'active') {
-    if (!session) adopt(id, view.startedAt);
+    if (!session) adopt(id, view.startedAt, view.encryptionKey);
     return;
   }
+  if (view?.encryptionKey) { await openHistory(id); return; }
   forget();
   if (view) say('Session expired — start again.');
 }
@@ -437,7 +453,12 @@ function render(s) {
 
 function renderLive(view) {
   // Stopped by the sweep after a long sleep, from another tab, or deleted.
-  if (!view || view.status !== 'active') { stop('Session expired — start again.', false, true); return; }
+  if (!view || view.status !== 'active') {
+    const id = session.id;
+    stop(view?.encryptionKey ? 'Session stopped. Encrypted history is saved.' : 'Session expired — start again.', false, true);
+    if (view?.encryptionKey) openHistory(id).catch((e) => say(e.message, true));
+    return;
+  }
   session.watches = view.watches; // Telegram may have edited the rules
   renderRules();
   const known = view.watches.filter((w) => w.state !== null);
@@ -512,6 +533,120 @@ function say(text, isError) { status.textContent = text; status.classList.toggle
 function flash() { document.body.classList.add('flash'); setTimeout(() => document.body.classList.remove('flash'), 600); }
 let toastTimer;
 function showToast(text) { toast.textContent = text; toast.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => (toast.hidden = true), 4000); }
+
+// ---------- encrypted history ----------
+let viewedKey = null;
+let archiveGeneration = 0;
+const HISTORY_KEY = 'watcher.history';
+function historyEntries() { return JSON.parse(localStorage.getItem(HISTORY_KEY) || '{}'); }
+function rememberHistory(id, key, startedAt) {
+  const entries = historyEntries();
+  entries[id] = { key, startedAt };
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(entries));
+  showHistory();
+}
+function showHistory() {
+  const select = $('historyList');
+  select.innerHTML = '';
+  const empty = document.createElement('option');
+  empty.value = ''; empty.textContent = 'Choose a saved session'; select.append(empty);
+  for (const [id, entry] of Object.entries(historyEntries()).sort((a, b) => b[1].startedAt - a[1].startedAt)) {
+    const option = document.createElement('option');
+    option.value = id; option.textContent = new Date(entry.startedAt).toLocaleString();
+    select.append(option);
+  }
+}
+async function prepareRules(rules, publicKey, single = false) {
+  if (!subscriber) await subscribe();
+  const { specs } = await api('/normalize', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ rules, subscriber }),
+  });
+  const watches = await Promise.all(specs.map(async (s, i) => ({
+    rule: await Privacy.encrypt(rules[i], publicKey, 'rule'),
+    predicate: await Privacy.encrypt(s.predicate, publicKey, 'predicate'), direction: s.direction,
+  })));
+  const usage = specs.reduce((a, s) => {
+    for (const k of Object.keys(a)) a[k] += s.usage[k];
+    return a;
+  }, { prompt: 0, completion: 0, calls: 0, usdTicks: 0 });
+  return single ? { watch: watches[0], usage } : { watches, usage };
+}
+async function decryptFields(row, fields, key) {
+  const result = { ...row };
+  for (const field of fields) result[field] = await Privacy.decrypt(row[field], key, field);
+  return result;
+}
+async function decryptLive(view, key) {
+  if (!view || !key) return view;
+  return { ...view, watches: await Promise.all(view.watches.map((w) => decryptFields(w, ['rule', 'predicate', 'evidence'], key))) };
+}
+async function decryptEvents(list, key) {
+  if (!key) return list;
+  return Promise.all(list.map((e) => decryptFields(e, ['rule', 'text'], key)));
+}
+function encryptedUpdate(current, decode, render) {
+  let sequence = 0;
+  return (value) => {
+    const n = ++sequence;
+    if (!current.encryptionKey) { if (session === current) render(value); return; }
+    decode(value, current.encryptionKey).then((clear) => {
+      if (session === current && n === sequence) render(clear);
+    }).catch((e) => {
+      if (session === current && n === sequence) {
+        stop(); // release subscriptions, heartbeat and camera; retain encrypted history
+        say(e.message, true);
+      }
+    });
+  };
+}
+async function openHistory(id) {
+  if (session) throw new Error('Stop the current watch before opening saved history.');
+  const attempt = ++archiveGeneration;
+  const view = await client.query('sessions:live', { sessionId: id });
+  if (!view) throw new Error('This session is no longer available.');
+  if (!view.encryptionKey) throw new Error('This session predates encrypted history.');
+  const clear = await decryptLive(view, view.encryptionKey);
+  const list = await decryptEvents(await client.query('events:list', { sessionId: id }), view.encryptionKey);
+  if (attempt !== archiveGeneration || session) return;
+  viewedKey = view.encryptionKey;
+  rememberHistory(id, viewedKey, view.startedAt);
+  pending = clear.watches.map((w) => w.rule); renderRules();
+  dropFrames(); lastEventId = null; renderEvents(list); renderUsage(view.usage);
+  evidence.textContent = clear.watches.map((w) => w.evidence).filter(Boolean).join(' · ') || '—';
+  history.replaceState(null, '', `?session=${id}`);
+  say('Saved history unlocked. Watch starts a new session with these rules.');
+}
+$('historyList').addEventListener('change', (e) => {
+  if (e.target.value) openHistory(e.target.value).catch((error) => say(error.message, true));
+});
+$('exportKey').addEventListener('click', async () => {
+  try {
+    const key = session?.encryptionKey || viewedKey || await Privacy.current();
+    const ids = Object.entries(historyEntries()).filter(([, e]) => e.key === key).map(([id]) => id);
+    const backup = await Privacy.exportBackup(key, ids);
+    const url = URL.createObjectURL(new Blob([backup], { type: 'application/json' }));
+    const link = document.createElement('a'); link.href = url; link.download = 'watcher-recovery.json'; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    say('Recovery file downloaded. Keep it private: it unlocks your saved sessions.');
+  } catch (e) { say(e.message, true); }
+});
+$('importKey').addEventListener('click', () => $('keyFile').click());
+$('keyFile').addEventListener('change', async (e) => {
+  try {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 1000000) throw new Error('Recovery file is too large.');
+    const backup = await Privacy.importBackup(await file.text());
+    viewedKey = backup.publicKey;
+    for (const id of backup.sessions) rememberHistory(id, backup.publicKey, historyEntries()[id]?.startedAt || Date.now());
+    for (const entry of await client.query('sessions:history', { encryptionKey: backup.publicKey }))
+      rememberHistory(entry.id, backup.publicKey, entry.startedAt);
+    say('Recovery key imported. Choose a saved session to open it.');
+    if (!session) await resume();
+  } catch (error) { say(error.message || 'Invalid recovery file.', true); }
+  finally { e.target.value = ''; }
+});
 
 // ---------- wiring ----------
 // Watch is the submit button, so Enter in the box and the button do the same thing: start the
@@ -664,6 +799,6 @@ if (!client) {
   openCamera()
     .then(revealFlipIfMultiCamera)
     .catch((e) => say(`Camera unavailable: ${e.message}. Use https:// or localhost.`, true))
-    .then(resume)
+    .then(() => { showHistory(); return resume(); })
     .catch((e) => say(e.message, true));
 }

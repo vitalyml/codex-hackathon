@@ -28,11 +28,13 @@ export const keepAlive = internalAction({
   },
 });
 
-/** A stop is final: the session goes `stopped` and its deletion is scheduled at once.
- * What the model saw is the user's camera and lives only as long as the session. */
+/** Protected text is retained as history; legacy sessions keep their deletion policy. */
 export async function stopSession(ctx: MutationCtx, sessionId: Id<"sessions">) {
-  await ctx.db.patch(sessionId, { status: "stopped" });
-  await ctx.scheduler.runAfter(0, internal.crons.cleanup, { resume: sessionId });
+  const session = await ctx.db.get(sessionId);
+  if (!session) return;
+  await ctx.db.patch(sessionId, { status: session.encryptionKey ? "archived" : "stopped" });
+  if (!session.encryptionKey)
+    await ctx.scheduler.runAfter(0, internal.crons.cleanup, { resume: sessionId });
 }
 
 /** Deletes stopped sessions with their events, one session at a time. One bounded batch
@@ -51,6 +53,14 @@ export const cleanup = internalMutation({
         .first();
       if (!session) return null;
     }
+    if (session.status !== "stopped") return null;
+    // Upgrade retained sessions from the first encryption version without scanning
+    // past them on every cleanup. New protected sessions go straight to archived.
+    if (session.encryptionKey) {
+      await ctx.db.patch(session._id, { status: "archived" });
+      await ctx.scheduler.runAfter(0, internal.crons.cleanup, {});
+      return null;
+    }
     const sessionId = session._id;
     const owned = (table: "events" | "watches" | "presence") =>
       ctx.db
@@ -59,7 +69,7 @@ export const cleanup = internalMutation({
     const events = await owned("events").take(BATCH);
     for (const event of events) {
       // Before 2026-09-22 events had a photo, shared by the events of one frame.
-      if (event.storageId && (await ctx.db.system.get(event.storageId)))
+      if ("storageId" in event && event.storageId && (await ctx.db.system.get(event.storageId)))
         await ctx.storage.delete(event.storageId);
       await ctx.db.delete(event._id);
     }

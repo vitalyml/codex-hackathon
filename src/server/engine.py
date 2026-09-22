@@ -21,6 +21,7 @@ from src.server.convex_client import Convex, ConvexError
 from src.server.cv.gate import GateResult, decode
 from src.server.cv.perception import Perception, PerceptionError
 from src.server.notifier import Notifier
+from src.server.privacy import encrypt, load_public_key
 from src.server.session import Event, Feed, Watch
 from src.server.tracker import Tracker
 
@@ -49,6 +50,7 @@ async def handle_frame(
     convex: Convex,
     notifier: Notifier,
     force: bool = False,
+    clear_watches: Optional[list[dict]] = None,
 ) -> dict:
     """`force`: the page changed the rules, so ask the model even if the scene is quiet."""
     async with feed.lock:  # gate state is per-session and not thread-safe
@@ -76,7 +78,16 @@ async def handle_frame(
         feed.busy = True
         call_id = secrets.token_hex(8)
         feed.task = asyncio.create_task(
-            perceive(feed, session_id, call_id, jpeg, perception, convex, notifier)
+            perceive(
+                feed,
+                session_id,
+                call_id,
+                jpeg,
+                perception,
+                convex,
+                notifier,
+                clear_watches,
+            )
         )
         return _status(feed, gate, call_id)
 
@@ -89,15 +100,18 @@ async def perceive(
     perception: Perception,
     convex: Convex,
     notifier: Notifier,
+    clear_watches: Optional[list[dict]] = None,
 ) -> None:
     """Background: ask the model, update the trackers, record the answer. Never raises."""
     try:
-        await _observe(feed, session_id, call_id, jpeg, perception, convex, notifier)
-    except (PerceptionError, ConvexError) as e:
+        await _observe(
+            feed, session_id, call_id, jpeg, perception, convex, notifier, clear_watches
+        )
+    except (PerceptionError, ConvexError, ValueError) as e:
         # Not resubmitted: the next frame makes a fresh model call, so a record that
         # committed but whose response was lost cannot be applied twice.
         feed.retry = True
-        logger.warning("session={} model call failed: {}", session_id, e)
+        logger.warning("session={} model call failed: {}", session_id, type(e).__name__)
     finally:
         feed.busy = False
 
@@ -111,8 +125,10 @@ async def _notify(
 ) -> None:
     try:
         await notifier.notify(session_id, watch, event, chat_id)
-    except Exception:
-        logger.exception("session={} notification failed", session_id)
+    except Exception as e:
+        logger.warning(
+            "session={} notification failed: {}", session_id, type(e).__name__
+        )
 
 
 async def _observe(
@@ -123,6 +139,7 @@ async def _observe(
     perception: Perception,
     convex: Convex,
     notifier: Notifier,
+    clear_watches: Optional[list[dict]] = None,
 ) -> None:
     view = await convex.query("sessions:live", sessionId=session_id)
     if view is None or view["status"] != "active":
@@ -130,6 +147,27 @@ async def _observe(
         logger.info("session={} closed: no more model calls", session_id)
         return
     stored = view["watches"]  # a snapshot: edits race, worker:record ignores stale ids
+    public_key = view.get("encryptionKey")
+    if public_key:
+        load_public_key(
+            public_key
+        )  # reject invalid recipients before a paid model call
+        if not clear_watches:
+            raise ValueError("encrypted session requires browser rules")
+        supplied = {w["id"]: w for w in clear_watches}
+        stored = [
+            {
+                **w,
+                "rule": supplied[w["id"]]["rule"],
+                "predicate": supplied[w["id"]]["predicate"],
+            }
+            for w in stored
+            if w["id"] in supplied
+        ]
+        if len(stored) < len(view["watches"]):
+            feed.retry = True  # a newer watch still needs a fresh browser snapshot
+        if not stored:
+            return  # rules changed since the browser sent this frame
     detection = await perception.detect(jpeg, [w["predicate"] for w in stored])
     results, fired = [], []
     for w, observation in zip(stored, detection.observations):
@@ -150,6 +188,13 @@ async def _observe(
             w["rule"], w["predicate"], w["direction"], tracker, observation.evidence
         )
         fired.append((w["id"], watch, text))
+    if public_key:
+        for result in results:
+            result["evidence"] = encrypt(result["evidence"], public_key, "evidence")
+            if "event" in result:
+                result["event"]["text"] = encrypt(
+                    result["event"]["text"], public_key, "text"
+                )
     # The next frame may no longer show what the model just saw, so a failed save is
     # retried with this very answer; callId keeps a repeat from being recorded twice.
     # The frame itself is never stored: it goes to Telegram from memory, and the page
@@ -167,7 +212,9 @@ async def _observe(
         except ConvexError as e:
             if attempt == SAVE_ATTEMPTS:
                 raise
-            logger.warning("session={} save failed, retrying: {}", session_id, e)
+            logger.warning(
+                "session={} save failed, retrying: {}", session_id, type(e).__name__
+            )
             await asyncio.sleep(SAVE_BACKOFF * attempt)
     # A rule dropped or edited while the model was thinking left no event: no alert either.
     fired = [f for f in fired if f[0] in recorded["watchIds"]]
@@ -175,7 +222,7 @@ async def _observe(
         "session={} usage +{} fired={} chat={}",
         session_id,
         detection.usage,
-        [w.rule for _, w, _ in fired],
+        len(fired),
         recorded["chatId"] is not None,
     )
     at = datetime.now(timezone.utc).isoformat(timespec="seconds")

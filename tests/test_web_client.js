@@ -42,7 +42,8 @@ function page({ stored = {}, search = '', answers = {} } = {}) {
       getItem: (k) => (k in storage ? storage[k] : null),
       setItem: (k, v) => { storage[k] = v; }, removeItem: (k) => { delete storage[k]; },
     },
-    fetch: () => new Promise(() => {}),
+    fetch: async () => ({ ok: true, json: async () => ({ specs: [{ predicate: 'cat', direction: 'rising', usage: { prompt: 1, completion: 0, calls: 1, usdTicks: 0 } }] }) }),
+    Privacy: { current: async () => 'public', encrypt: async (text) => 'enc:v1:' + text, requireKey: async () => {}, decrypt: async (text) => text },
     setTimeout() { return 1; }, clearTimeout() {},
     setInterval() { return 1; }, clearInterval() {},
     FormData: class { append() {} }, Date, Promise,
@@ -53,7 +54,7 @@ function page({ stored = {}, search = '', answers = {} } = {}) {
   const run = (code) => vm.runInContext(code, context);
   run(fs.readFileSync('static/app.js', 'utf8'));
   const push = (name, value) => subscriptions.filter((s) => s.active && s.name === name).forEach((s) => s.callback(value));
-  const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+  const settle = async () => { for (let i = 0; i < 80; i++) await Promise.resolve(); };
   return { element, run, calls, subscriptions, push, settle, storage };
 }
 
@@ -66,23 +67,32 @@ const same = (actual, expected) => assert.equal(JSON.stringify(actual), JSON.str
 const cat = { id: 'w1', rule: 'cat arrives', predicate: 'a cat is visible', direction: 'rising', state: null, evidence: '' };
 
 test('Watch starts a session in Convex, live queries drive the page, Stop ends it', async () => {
-  const p = page({ answers: { 'subscribers:create': 'sub1', 'sessions:start': { sessionId: 's1' } } });
+  const p = page({ answers: { 'subscribers:create': 'sub1', 'sessions:startEncrypted': { sessionId: 's1' } } });
   await p.settle();
   await p.run("start(['cat arrives'])");
-  same(p.calls.find((c) => c[1] === 'sessions:start')[2], { rules: ['cat arrives'], subscriber: 'sub1' });
+  const createdCall = p.calls.find((c) => c[1] === 'sessions:startEncrypted');
+  assert.equal(createdCall[0], 'mutation');
+  const sent = createdCall[2];
+  assert.equal(sent.encryptionKey, 'public');
+  assert.equal(sent.watches[0].rule, 'enc:v1:cat arrives');
+  assert.equal(sent.watches[0].predicate, 'enc:v1:cat');
+  assert.equal(sent.subscriber, 'sub1');
   assert.equal(p.storage['watcher.session'], 's1');
 
   p.push('sessions:live', live([{ ...cat, state: true, evidence: 'a tabby on the sofa' }]));
+  await p.settle();
   assert.equal(p.element('state').textContent, 'TRUE');
   assert.equal(p.element('evidence').textContent, '“a tabby on the sofa”');
   assert.equal(p.element('usage').textContent, '730');
   assert.equal(p.element('cost').textContent, '$0.0021');
 
   const event = { id: 'e1', at: Date.now(), text: 'a cat is visible - became true', rule: 'cat arrives', callId: 'c1' };
-  p.push('events:list', [event]); // what was there when the page subscribed is history, not news
+  p.push('events:list', [event]);
+  await p.settle(); // what was there when the page subscribed is history, not news
   assert.equal(p.element('toast').textContent, '');
   p.run("keepFrame('c2', {})"); // the frame that started call c2 stays in this tab only
   p.push('events:list', [event, { ...event, id: 'e2', text: 'again', callId: 'c2' }]);
+  await p.settle();
   assert.equal(p.element('toast').textContent, 'Event! again');
   const [newest, older] = p.element('events').children;
   assert.equal(newest.children.length, 2); // the photo, then the caption
@@ -103,7 +113,7 @@ test('Watch starts a session in Convex, live queries drive the page, Stop ends i
 
 test('Stop while the session is still being created stops the one that arrives late', async () => {
   let created;
-  const p = page({ answers: { 'subscribers:create': 'sub1', 'sessions:start': () => new Promise((r) => { created = r; }) } });
+  const p = page({ answers: { 'subscribers:create': 'sub1', 'sessions:startEncrypted': () => new Promise((r) => { created = r; }) } });
   await p.settle();
   const starting = p.run("start(['cat arrives'])");
   await p.settle();
@@ -133,4 +143,37 @@ test('a reload resumes an active session, forgets a stopped one, and obeys a rem
   p.push('sessions:live', live([cat], 'stopped'));
   assert.equal(p.run('session'), null);
   assert.ok(!p.calls.some((c) => c[1] === 'sessions:stop'));
+});
+
+
+test('a failed live decryption releases the session, timers and subscriptions', async () => {
+  const p = page({ answers: { 'subscribers:create': 'sub1', 'sessions:startEncrypted': { sessionId: 's1' } } });
+  await p.settle();
+  await p.run("start(['cat arrives'])");
+  p.run("Privacy.decrypt = async () => { throw new Error('damaged history'); }");
+  p.push('sessions:live', { ...live([cat]), encryptionKey: 'public' });
+  await p.settle();
+  assert.equal(p.run('session'), null);
+  assert.equal(p.run('heartbeat'), null);
+  assert.equal(p.run('timer'), null);
+  assert.ok(p.subscriptions.filter(s => s.name !== 'subscribers:get').every(s => !s.active));
+  assert.equal(p.element('stop').hidden, true);
+  assert.equal(p.element('start').hidden, false);
+  assert.equal(p.element('status').textContent, 'damaged history');
+  assert.ok(p.calls.some(c => c[1] === 'sessions:stop'));
+});
+
+test('remote legacy stop never promises saved encrypted history', async () => {
+  const p = page();
+  await p.settle();
+  p.run("adopt('legacy', Date.now())");
+  p.push('sessions:live', live([cat], 'stopped'));
+  assert.equal(p.element('status').textContent, 'Session expired — start again.');
+});
+
+test('imported history is sorted by timestamp instead of insertion order', async () => {
+  const p = page({ stored: { 'watcher.history': JSON.stringify({ newest: { startedAt: 30 }, oldest: { startedAt: 10 }, middle: { startedAt: 20 } }) } });
+  await p.settle();
+  p.run('showHistory()');
+  assert.deepEqual(p.element('historyList').children.map(o => o.value), ['', 'newest', 'middle', 'oldest']);
 });

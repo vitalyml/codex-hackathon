@@ -3,8 +3,9 @@ import { v } from "convex/values";
 
 export default defineSchema({
   sessions: defineTable({
-    status: v.union(v.literal("active"), v.literal("stopped")),
+    status: v.union(v.literal("active"), v.literal("stopped"), v.literal("archived")),
     subscriberId: v.optional(v.id("subscribers")),
+    encryptionKey: v.optional(v.string()), // public RSA key; private key stays in the browser
     lastCallId: v.optional(v.string()), // the last model answer recorded: see worker:record
     // Tokens spent by this session; usdTicks is an estimate, 1 tick = 1e-10 USD.
     usage: v.object({
@@ -15,6 +16,7 @@ export default defineSchema({
     }),
   })
     .index("by_status", ["status"])
+    .index("by_encryption_key", ["encryptionKey"])
     .index("by_subscriber", ["subscriberId", "status"]),
 
   // Heartbeats live apart from sessions so they do not invalidate sessions:live.

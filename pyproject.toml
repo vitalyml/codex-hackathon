@@ -13,6 +13,7 @@ fastapi = "^0.141.1"
 uvicorn = "^0.52.4"
 python-multipart = "^0.0.32"
 segno = "^1.6.6"
+cryptography = ">=46,<51"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"

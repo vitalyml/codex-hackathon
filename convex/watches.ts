@@ -42,6 +42,8 @@ export async function insertWatch(
   if (!session || session.status !== "active") return { error: "no_session" };
   await ctx.db.patch(sessionId, { usage: addUsage(session.usage, usage) });
   if (!watch) return null;
+  if (session.encryptionKey && (!watch.rule.startsWith("enc:v1:") || !watch.predicate.startsWith("enc:v1:")))
+    return { error: "encrypted_session", hint: "Edit protected rules in the camera browser." };
   const watches = await ctx.db
     .query("watches")
     .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
@@ -102,5 +104,15 @@ export const remove = mutation({
       return { error: "last_rule", hint: "keep at least one rule, or stop" };
     await ctx.db.delete(watchId);
     return null;
+  },
+});
+
+export const addEncrypted = mutation({
+  args: { sessionId: v.id("sessions"), watch: watchSpec, usage: usageValidator },
+  returns: v.union(v.null(), failure),
+  handler: async (ctx, args) => {
+    const session = await ctx.db.get(args.sessionId);
+    if (!session?.encryptionKey) return { error: "not_encrypted" };
+    return insertWatch(ctx, args.sessionId, args.usage, args.watch);
   },
 });

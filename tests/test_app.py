@@ -140,3 +140,60 @@ def test_stt_token_goes_only_to_a_known_subscriber():
     }
     assert asked[0]["type"] == "transcription"
     assert asked[0]["audio"]["input"]["transcription"]["language"] == "ru"
+
+
+def test_browser_normalization_requires_a_subscriber_and_does_not_persist_prompts():
+    convex = FakeConvex()
+    convex.subscribers["browser"] = {"linked": False}
+    client = TestClient(create_app(FakePerception(), convex, Notifier()))
+    assert (
+        client.post(
+            "/normalize", json={"subscriber": "unknown", "rules": ["a cat"]}
+        ).status_code
+        == 404
+    )
+    response = client.post(
+        "/normalize", json={"subscriber": "browser", "rules": ["a cat"]}
+    )
+    assert response.status_code == 200
+    assert response.json()["specs"][0]["predicate"] == "a cat is visible"
+    assert not convex.sessions and not convex.events and not convex.usage
+    for rules in ([], [""], ["x" * 4001]):
+        assert (
+            client.post(
+                "/normalize", json={"subscriber": "browser", "rules": rules}
+            ).status_code
+            == 400
+        )
+
+
+def test_normalize_endpoints_share_validation_and_redacted_errors(monkeypatch):
+    from src.server.cv.perception import PerceptionError
+
+    monkeypatch.setattr("src.config.WORKER_SECRET", "secret")
+
+    class Broken(FakePerception):
+        async def normalize(self, rule):
+            raise PerceptionError("private model output")
+
+    convex = FakeConvex()
+    convex.subscribers["browser"] = {"linked": False}
+    client = TestClient(create_app(Broken(), convex, Notifier()))
+    results = []
+    for path, headers in [
+        ("/normalize", {}),
+        ("/internal/normalize", {"authorization": "Bearer secret"}),
+    ]:
+        response = client.post(
+            path, headers=headers, json={"rules": ["r"], "subscriber": "browser"}
+        )
+        assert response.status_code == 502
+        assert "private" not in response.text
+        results.append(response.json())
+        assert (
+            client.post(
+                path, headers=headers, json={"rules": [""], "subscriber": "browser"}
+            ).status_code
+            == 400
+        )
+    assert results[0] == results[1]

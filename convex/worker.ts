@@ -54,7 +54,9 @@ export const record = mutation({
       const watch = await ctx.db.get(r.watchId);
       // Dropped or edited (an edit gives the watch a new id) while the model was
       // thinking, or the session stopped: the answer is for nothing that exists.
-      if (!watch || session.status !== "active") continue;
+      if (!watch || watch.sessionId !== session._id || session.status !== "active") continue;
+      if (session.encryptionKey && (!r.evidence.startsWith("enc:v1:") || (r.event && !r.event.text.startsWith("enc:v1:"))))
+        throw new Error("encryption_required");
       await ctx.db.patch(watch._id, { state: r.state, evidence: r.evidence });
       if (!r.event) continue;
       await ctx.db.insert("events", {
@@ -102,6 +104,7 @@ export const telegram = query({
         v.null(),
         v.object({
           id: v.id("sessions"),
+          encrypted: v.optional(v.boolean()),
           watches: v.array(
             v.object({
               id: v.id("watches"),
@@ -154,11 +157,12 @@ export const telegram = query({
       muted: subscriber.muted,
       session: {
         id: session._id,
+        encrypted: !!session.encryptionKey,
         watches: watches.map((w) => ({
           id: w._id,
-          rule: w.rule,
+          rule: session.encryptionKey ? "Protected rule — open the camera browser" : w.rule,
           state: w.state,
-          evidence: w.evidence,
+          evidence: session.encryptionKey ? "" : w.evidence,
         })),
         eventCount: events.length,
         events: events
@@ -169,8 +173,8 @@ export const telegram = query({
             id: e._id,
             n,
             at: e._creationTime,
-            text: e.text,
-            rule: e.rule,
+            text: session.encryptionKey ? "Protected event — open the camera browser" : e.text,
+            rule: session.encryptionKey ? "" : e.rule,
           })),
       },
     };
@@ -240,6 +244,8 @@ export const putWatch = mutation({
   returns: v.union(v.null(), failure),
   handler: async (ctx, args) => {
     checkSecret(args.secret);
+    if ((await ctx.db.get(args.sessionId))?.encryptionKey)
+      return { error: "encrypted_session", hint: "Edit protected rules in the camera browser." };
     if (!args.watch || !args.replaces)
       return insertWatch(ctx, args.sessionId, args.usage, args.watch);
     const failed = await insertWatch(ctx, args.sessionId, args.usage);

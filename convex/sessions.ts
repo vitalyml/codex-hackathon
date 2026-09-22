@@ -1,6 +1,6 @@
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
-import { action, internalMutation, mutation, query } from "./_generated/server";
+import { MutationCtx, action, internalMutation, mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 import { stopSession } from "./crons";
 import {
@@ -42,43 +42,49 @@ export const start = action({
   },
 });
 
-export const create = internalMutation({
-  args: {
-    watches: v.array(
-      v.object({ rule: v.string(), predicate: v.string(), direction }),
-    ),
-    usage: usageValidator,
-    subscriber: v.optional(v.string()),
-  },
-  returns: v.union(v.object({ sessionId: v.id("sessions") }), failure),
-  handler: async (ctx, args) => {
-    // Checked here, inside the transaction: two starts cannot both take the last slot.
-    const active = await ctx.db
-      .query("sessions")
-      .withIndex("by_status", (q) => q.eq("status", "active"))
-      .collect();
-    if (active.length >= MAX_SESSIONS) return { error: "full" };
-    // A string, not an id: it comes from localStorage and may be stale or garbage.
-    const subscriberId =
-      args.subscriber && ctx.db.normalizeId("subscribers", args.subscriber);
-    const subscriber = subscriberId ? await ctx.db.get(subscriberId) : null;
-    const sessionId = await ctx.db.insert("sessions", {
-      status: "active",
-      subscriberId: subscriber?._id,
-      usage: args.usage,
+const createArgs = v.object({
+  watches: v.array(
+    v.object({ rule: v.string(), predicate: v.string(), direction }),
+  ),
+  usage: usageValidator,
+  subscriber: v.optional(v.string()),
+  encryptionKey: v.optional(v.string()),
+});
+
+async function createSession(ctx: MutationCtx, args: typeof createArgs.type): Promise<{ sessionId: Id<"sessions"> } | Failure> {
+  // Checked here, inside the transaction: two starts cannot both take the last slot.
+  const active = await ctx.db
+    .query("sessions")
+    .withIndex("by_status", (q) => q.eq("status", "active"))
+    .collect();
+  if (active.length >= MAX_SESSIONS) return { error: "full" };
+  // A string, not an id: it comes from localStorage and may be stale or garbage.
+  const subscriberId =
+    args.subscriber && ctx.db.normalizeId("subscribers", args.subscriber);
+  const subscriber = subscriberId ? await ctx.db.get(subscriberId) : null;
+  const sessionId = await ctx.db.insert("sessions", {
+    status: "active",
+    encryptionKey: args.encryptionKey,
+    subscriberId: subscriber?._id,
+    usage: args.usage,
+  });
+  await ctx.db.insert("presence", { sessionId, lastSeen: Date.now() });
+  for (const [order, w] of args.watches.entries())
+    await ctx.db.insert("watches", {
+      sessionId,
+      order,
+      ...w,
+      state: null,
+      evidence: "",
     });
-    await ctx.db.insert("presence", { sessionId, lastSeen: Date.now() });
-    for (const [order, w] of args.watches.entries())
-      await ctx.db.insert("watches", {
-        sessionId,
-        order,
-        ...w,
-        state: null,
-        evidence: "",
-      });
-    if (subscriber) await ctx.db.patch(subscriber._id, { lastSeen: Date.now() });
-    return { sessionId };
-  },
+  if (subscriber) await ctx.db.patch(subscriber._id, { lastSeen: Date.now() });
+  return { sessionId };
+}
+
+export const create = internalMutation({
+  args: createArgs,
+  returns: v.union(v.object({ sessionId: v.id("sessions") }), failure),
+  handler: createSession,
 });
 
 /** Everything the page shows about a running session except the event list. Takes a
@@ -88,7 +94,7 @@ export const live = query({
   returns: v.union(
     v.null(),
     v.object({
-      status: v.union(v.literal("active"), v.literal("stopped")),
+      status: v.union(v.literal("active"), v.literal("stopped"), v.literal("archived")),
       watches: v.array(
         v.object({
           id: v.id("watches"),
@@ -102,6 +108,7 @@ export const live = query({
       usage: usageValidator,
       startedAt: v.number(),
       telegram: v.boolean(),
+      encryptionKey: v.optional(v.string()),
     }),
   ),
   handler: async (ctx, args) => {
@@ -117,6 +124,7 @@ export const live = query({
       : null;
     return {
       status: session.status,
+      encryptionKey: session.encryptionKey,
       watches: watches.map((w) => ({
         id: w._id,
         rule: w.rule,
@@ -138,5 +146,36 @@ export const stop = mutation({
   handler: async (ctx, { sessionId }) => {
     if (await ctx.db.get(sessionId)) await stopSession(ctx, sessionId);
     return null;
+  },
+});
+
+/** The browser has already normalized on the worker and encrypted all text. */
+export const startEncrypted = mutation({
+  args: {
+    watches: v.array(v.object({ rule: v.string(), predicate: v.string(), direction })),
+    usage: usageValidator,
+    encryptionKey: v.string(),
+    subscriber: v.optional(v.string()),
+  },
+  returns: v.union(v.object({ sessionId: v.id("sessions") }), failure),
+  handler: async (ctx, args): Promise<{ sessionId: Id<"sessions"> } | Failure> => {
+    if (!args.watches.length || args.watches.length > MAX_WATCHES ||
+        args.encryptionKey.length > 1000 || !args.encryptionKey.startsWith("MIIB"))
+      return { error: "invalid_encrypted_session" };
+    if (args.watches.some(w => !w.rule.startsWith("enc:v1:") || !w.predicate.startsWith("enc:v1:")))
+      return { error: "encryption_required" };
+    return await createSession(ctx, args);
+  },
+});
+
+/** The key is public; this index discovers ciphertext, never grants decryption. */
+export const history = query({
+  args: { encryptionKey: v.string() },
+  returns: v.array(v.object({ id: v.id("sessions"), startedAt: v.number() })),
+  handler: async (ctx, args) => {
+    const sessions = await ctx.db.query("sessions")
+      .withIndex("by_encryption_key", q => q.eq("encryptionKey", args.encryptionKey))
+      .order("desc").take(100);
+    return sessions.map(s => ({ id: s._id, startedAt: s._creationTime }));
   },
 });
