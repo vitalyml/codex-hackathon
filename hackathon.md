@@ -5,17 +5,17 @@
 - **What it does:** Point a camera at anything, describe in plain English what should
   happen, and get a photo the moment it does — a vision model watches the feed, a Telegram
   bot delivers the alert.
-- **Live app:** not deployed
-- **Repo:** https://github.com/aroldohernandezarmas/codex-hackathon
+- **Live app:** https://academic-peacock-398.convex.site
+- **Repo:** https://github.com/vitalyml/codex-hackathon
 - **Frontend:** Convex static hosting
-- **Convex deployment:** not deployed
+- **Convex deployment:** https://academic-peacock-398.convex.cloud
 - **Components:** @convex-dev/static-hosting
 - **Convex features:** schema, tables, indexes, queries, mutations, actions, crons, file
   storage, realtime queries
 - **Auth:** none
 - **AI models:** gpt-4o (OpenAI, since 2026-09-21; grok-4.20-0309-non-reasoning before)
 - **Started:** 2026-09-12T08:29:25Z
-- **Last updated:** 2026-09-21T18:22:30Z
+- **Last updated:** 2026-09-21T20:56:43Z
 
 ## Log
 
@@ -122,3 +122,31 @@ new id so a model answer in flight for the old wording is ignored. The old in-me
 session and subscriber stores are deleted. A smoke script drives a session from start to
 stop through the page's and the bot's functions against the dev deployment
 (`convex/worker.ts`, `src/server/telegram/notifier.py`, `scripts/convex_smoke.py`).
+
+### 2026-09-21 - 6a83487
+Deploys are one push now. A GitHub Actions workflow runs on changes to `convex/`,
+`static/` or the build script, fails early if the page config (`WORKER_URL`,
+`TELEGRAM_BOT_USERNAME`, the deploy key) is missing, then ships functions and the page
+together with `@convex-dev/static-hosting deploy`, so the two never drift apart
+(`.github/workflows/deploy.yml`).
+
+### 2026-09-21 - 96a1b15
+Two fixes from the first full run. A visitor's own 10-minute limit no longer stops a
+session shared by link, and the heartbeat fires at once when a tab resumes. Alerts go out
+only for events that were actually kept: `worker:record` returns the watches whose events
+it stored, so a rule removed while the model was thinking stays silent. A Telegram button
+older than the last five events still opens its photo through `worker:event`, and
+`subscribers:create` never evicts the subscriber of an active session
+(`static/app.js`, `convex/worker.ts`, `convex/subscribers.ts`, `src/server/engine.py`).
+
+### 2026-09-21 - 58974c3
+Production is live on Convex static hosting. The first deploy put the page up with dead
+buttons: it was calling a worker that still ran the pre-Convex build, with no CORS for the
+page's origin and no `/internal/normalize`, and a trailing slash in `WORKER_URL` turned
+every call into `//session/...`, a 404. Fixed at each boundary: the page, the Convex
+calls to the worker (`workerUrl()`) and `FRONTEND_ORIGIN` all drop the slash. The Convex
+branch was merged into `master`, and the worker moved to a new Render service in
+`virginia` built from `render.yaml`. Checked from outside: `/health` answers from the new
+build, the preflight allows the page's origin, `/internal/normalize` rejects a call
+without the secret, and a rule saved from the live page starts a watch
+(`static/app.js`, `convex/lib.ts`, `convex/crons.ts`, `src/config.py`).
