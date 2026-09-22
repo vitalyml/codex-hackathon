@@ -9,37 +9,14 @@ moment on your phone.
 
 **No special hardware.** Take the old phone from the drawer, open the page, prop it up
 against a mug, and forget about it. Telegram will tell you when something happens.
-OpenAI's `gpt-4o` does the looking; Convex holds every rule, event and photo and pushes
-them live to the page; the phone just has to have a camera.
+Grok's vision API does the looking; Render hosts it; the phone just has to have a camera.
 
-> Built at the Grok Bot Serbia Hackathon, Belgrade, 12 September 2026. Rebuilt on Convex
-> for the Convex All Gas Hackathon, September 2026: the build log is in
-> [hackathon.md](hackathon.md), the design decisions in
-> [the ADR](docs/decisions/ADR-20260921-convex-as-state-backend.md).
+> Built at the Grok Bot Serbia Hackathon, Belgrade, 12 September 2026.
 
-```mermaid
-flowchart LR
-    B["Browser<br/>camera + page<br/>(served from convex.site)"]
-    C[("Convex<br/>sessions · watches · events<br/>photos · subscribers · crons")]
-    subgraph W["Worker (FastAPI on Render) - keeps nothing durable"]
-        G["Gate<br/>static-scene filter"] -->|changed| P[Perception] --> T[Tracker]
-        G -->|static| S["skip<br/>0 tokens"]
-    end
-    M["OpenAI gpt-4o"]
-    TG["Telegram bot"]
-    B -->|"many frames"| G
-    B <-->|"live queries, mutations, actions"| C
-    P <-->|"frame + rules / yes-no + evidence"| M
-    T -->|"worker:record + event photo"| C
-    C -->|"watches, tracker state"| P
-    C -.->|"normalize a new rule"| W
-    T -->|"proof photo"| TG
-    TG <-->|"snapshot / pause / rules"| C
-```
+![Watcher architecture: camera frames enter the server, the gate drops static scenes, only changed frames go to Grok, the tracker fires once per event and Telegram delivers the proof photo](docs/images/architecture.png)
 
-Many frames in, few model calls, one alert per event. The gate is where most frames die;
-everything after it runs only when the scene actually changed. Frames never pass through
-Convex; everything worth keeping does.
+Many frames in, few model calls, one alert per event. The gate in the middle is where most
+frames die; everything to its right runs only when the scene actually changed.
 
 ## What it feels like
 
@@ -86,7 +63,7 @@ page or from Telegram without restarting.
 table, not "cat present". You say when; it figures out what state to look for and which
 direction the change goes.
 
-**It thinks like a person, not a pixel counter.** A vision model (`gpt-4o`) looks at the
+**It thinks like a person, not a pixel counter.** A vision model (Grok) looks at the
 frame and answers your rule in words. It works on things no motion detector can see:
 a light turning on, a pot boiling over, a parcel appearing on the doorstep, a dog getting
 on the sofa.
@@ -131,7 +108,7 @@ The only limit is what you think of asking.
 
 ## Preprocessing: why a static room costs nothing
 
-Every frame from the browser passes through a gate before anything is sent to the model. The
+Every frame from the browser passes through a gate before anything is sent to Grok. The
 gate answers one question: *is there anything in this frame the model hasn't already
 seen?* If not, the frame is dropped and costs zero tokens. Three of the four pairs below
 are the same kitchen; the gate lets only the cat through.
@@ -189,7 +166,7 @@ The same pair before and after steps 2 and 3:
 Two details that matter in practice:
 
 - **Frames during a model call are gated but not sent.** One in-flight request per
-  session. If the scene changed while the model was thinking, the next frame carries it.
+  session. If the scene changed while Grok was thinking, the next frame carries it.
 - **Quiet frames never move the anchor.** The anchor advances only when a frame is sent,
   so a slow change (dusk, a cat creeping in) accumulates against the same reference until
   it crosses the threshold, instead of hiding in a chain of small steps.
@@ -207,31 +184,18 @@ camera moves and flat scenes may still trigger calls.
 
 ## Run it yourself
 
-You need Python 3.10, Poetry, Node, an OpenAI API key and a free Convex project. A
-Telegram bot token is optional but that's where the fun is.
+You need Python 3.10, Poetry, and an xAI API key. A Telegram bot token is optional but
+that's where the fun is.
 
 ```bash
 make install                 # poetry install
-npm install
-npx convex dev --once        # creates the dev deployment, writes CONVEX_URL to .env.local
-cp .env.example .env         # OPENAI_API_KEYS, CONVEX_URL, WORKER_SECRET, optionally TELEGRAM_BOT_TOKEN
-npx convex env set WORKER_SECRET <the same value as in .env>
-make dev                     # the worker and the page: http://localhost:8000
+cp .env.example .env         # fill in XAI_API_KEYS, optionally TELEGRAM_BOT_TOKEN
+make dev                     # http://localhost:8000
 ```
 
-Starting a watch and adding a rule are Convex actions that call the worker back to
-normalize the rule, so Convex has to reach your machine:
-
-```bash
-cloudflared tunnel --url http://localhost:8000
-npx convex env set WORKER_URL https://<the tunnel>.trycloudflare.com
-poetry run python scripts/convex_smoke.py    # a session from start to stop, against dev
-```
-
-Browsers only expose the camera on `https://` or `localhost`, so for a phone you'll want
-the deploy: `npx convex deploy` for the functions, `npm run build && npm run deploy` for
-the page (Convex static hosting), and Render from `render.yaml` for the worker. Secrets
-live in the Render and Convex dashboards.
+Browsers only expose the camera on `https://` or `localhost`, so for a phone on the same
+Wi-Fi you'll want a tunnel or a deploy. `render.yaml` deploys the whole thing to Render
+on push to `master`; secrets live in the Render dashboard.
 
 To create the Telegram bot: talk to [@BotFather](https://t.me/BotFather), `/newbot`,
 copy the token into `.env`. Full details in [src/server/telegram/README.md](src/server/telegram/README.md).
@@ -244,61 +208,46 @@ make lint                    # black --check, isort --check, mypy
 
 ## Under the hood
 
-Convex is the backend: all state, the page itself, and the live updates. A FastAPI
-process on Render is a compute worker behind it, for the two things that do not fit
-Convex functions: a frame a second per session, and OpenCV.
+One FastAPI process, one static page, no database. Hosted on Render: `render.yaml`
+deploys on every push to `master`, Render terminates TLS, which browsers require before
+they hand over the camera.
 
-- **Convex** (`convex/`) owns sessions, watches with their tracker state, events with
-  photos in file storage, token usage and Telegram subscribers. Limits are checked inside
-  mutations, so "at most 5 rules" and "never below one" hold under any race. A 20 s
-  heartbeat and a cron sweep stop sessions whose tab is gone; another cron keeps the
-  free-tier worker awake. Worker-only functions take a shared secret.
-- **Browser** grabs a frame every 1 to 10 seconds (your slider), JPEG-encodes it and posts
-  it straight to the worker. Everything it shows comes from Convex live queries
-  (`sessions:live`, `events:list`, `subscribers:get`). A session survives a reload and
-  can be shared as `?session=<id>`.
+- **Browser** grabs a frame every 1 to 10 seconds (your slider), JPEG-encodes it, posts it.
+  Model results come back over Server-Sent Events.
 - **Gate** (`src/server/cv/gate.py`) decides whether the frame is worth a model call.
   See [Preprocessing: why a static room costs nothing](#preprocessing-why-a-static-room-costs-nothing).
-- **Perception** (`src/server/cv/perception.py`) is `gpt-4o` through the Chat
-  Completions endpoint (any OpenAI-compatible one works: `OPENAI_BASE_URL`). One frame and all your rules go in a single
+- **Perception** (`src/server/cv/perception.py`) is Grok's vision API through the
+  OpenAI-compatible Chat Completions endpoint. One frame and all your rules go in a single
   prompt; back comes a true/false plus a few words of evidence per rule. Your rule is
   first normalised by a text-only call into a state a single frame can answer, plus the
   direction of change you're waiting for. Several API keys can be listed; it fails over
   between them.
-- **Tracker** (`src/server/tracker.py`) fires only on the edge: rising for "appears",
-  falling for "leaves". Same answer twice in a row is silence, so one moment is one
-  alert. It is rebuilt for every model call from the state stored in Convex, and the
-  whole answer goes back in one mutation, `worker:record`.
+- **Tracker** (`src/server/tracker.py`) remembers the last confirmed answer per rule and
+  fires only on the edge: rising for "appears", falling for "leaves". Same answer twice
+  in a row is silence, so one moment is one alert.
 - **Notifier** logs the event, and if Telegram is configured, sends the proof frame as a
-  photo to the chat `worker:record` names. The bot binds to a browser, not a session, so
-  one QR scan covers everything that browser watches later; its screens read and change
-  the same Convex state as the page.
+  photo. The bot binds to a browser, not a session, so one QR scan covers everything
+  that browser watches later.
 
-The worker keeps only what is safe to lose: the gate's anchor frame and the last frame
-for Telegram snapshots. Restart it mid-session and the next frame carries on.
-Settings are environment variables with defaults; see
-`.env.example` and `src/config.py`.
+Sessions live in memory and expire after 30 seconds of silence. Settings are environment
+variables with defaults; see `.env.example` and `src/config.py`.
 
 ## What it costs
 
-OpenAI reports tokens, not money, so the counter on the page is an estimate: token counts
-times the per-million prices in `OPENAI_PRICE_*` ($2.50 in, $10.00 out for `gpt-4o`).
+The counter on the page is not an estimate: every Grok response carries the exact
+amount billed for that call (`usage.cost_in_usd_ticks`, 1 tick = 1e-10 USD), and the
+session just adds them up. Cached prompt tokens and image tokens are already priced in.
 
-One call is one frame plus all your rules. Frames go with image `detail: low`, which is
-about 190 prompt tokens with a single rule instead of 530, with the same answers on our
-test frames: about **$0.0007 a call** and 1.3 s. Prompt caching never kicks in (it needs
-a 1,024-token identical prefix; ours is about 100 tokens and then a new frame). What you
-pay per day is that number times how many frames reach the model, and two things decide
-that: the slider and the gate.
+One call is one frame plus all your rules, about 520 prompt tokens with a single rule:
+240 for the image, the rest for the prompt text, which xAI mostly serves from cache.
+That is $0.0004 to $0.0006 on `grok-4.20-0309-non-reasoning`. What you pay per day is
+that number times how many frames reach the model, and two things decide that: the
+slider and the gate.
 
-| frame interval | max: every frame reaches the model | typical: the gate passes 1 in 5 |
-|---|---|---|
-| 1 s  | $60 a day | $12 a day |
-| 5 s  | $12 a day | $2.4 a day |
-| 10 s | $6 a day  | $1.2 a day |
+![Watcher cost by frame interval: max assumes the gate passes every frame at $0.0006 per call, avg is a real session where the gate passed about 20% of frames at $0.0005 per call; 1 s interval is $52 per day worst case and $8.7 typical, 10 s is $5.2 and $0.9](docs/images/cost.png)
 
 Max is the ceiling: the scene changes every frame and the gate lets everything through.
-Typical is a room where something happens now and then; in a measured session the gate
+Avg is a measured session: a room where something happened now and then, the gate
 dropped four frames out of five. Cost is linear in the interval, so doubling the slider
 halves the bill. A tab in the background sends nothing.
 
