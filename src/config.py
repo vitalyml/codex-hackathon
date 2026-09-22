@@ -16,6 +16,9 @@ OPENAI_API_KEYS = [
     k.strip() for k in os.getenv("OPENAI_API_KEYS", "").split(",") if k.strip()
 ]
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+# Dictation. gpt-realtime-whisper streams words while the user speaks; the cheaper
+# *-transcribe models answer only after a pause.
+OPENAI_STT_MODEL = os.getenv("OPENAI_STT_MODEL", "gpt-realtime-whisper")
 # low: the frame costs a flat 85 tokens instead of ~430, and the page sends 640 px
 # frames anyway. auto | high bring the detail back if small objects get missed.
 OPENAI_IMAGE_DETAIL = os.getenv("OPENAI_IMAGE_DETAIL", "low")

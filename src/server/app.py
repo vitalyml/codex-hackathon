@@ -4,14 +4,26 @@ the page talks to Convex for everything except the frame stream, which comes her
 import asyncio
 import json
 import secrets
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path as FilePath
 from typing import Optional
 
-from fastapi import FastAPI, File, Header, HTTPException, Path, Response, UploadFile
+import httpx
+from fastapi import (
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    Path,
+    Query,
+    Response,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from loguru import logger
 from pydantic import BaseModel
 
 from src import config
@@ -36,6 +48,7 @@ def create_app(
     notifier: Notifier,
     bot: Optional[Bot] = None,
     feeds: Optional[Feeds] = None,
+    stt: Optional[httpx.AsyncClient] = None,  # OpenAI, for dictation; None: no mic
 ) -> FastAPI:
     feeds = feeds if feeds is not None else Feeds()
 
@@ -156,6 +169,47 @@ def create_app(
             raise HTTPException(404, "no telegram bot configured")
         return Response(bot.qr_svg(token), media_type="image/svg+xml")
 
+    @app.post("/subscriber/{token}/stt-token")
+    async def stt_token(
+        token: str = Path(pattern=r"^[A-Za-z0-9_-]{1,64}$"),
+        lang: Optional[str] = Query(None, pattern=r"^[a-z]{2}$"),
+    ):
+        """A one-minute OpenAI key for the page: the browser streams the microphone to
+        OpenAI itself over WebRTC, so the audio never crosses this worker."""
+        if stt is None:
+            raise HTTPException(404, "dictation is not configured")
+        # ponytail: the limit is the only gate, and subscribers:renew reopens it for
+        # free - rate-limit per subscriber once payments are real.
+        try:
+            subscriber = await convex.query("subscribers:get", token=token)
+        except ConvexError as e:
+            raise HTTPException(503, f"state backend unavailable: {e}")
+        if subscriber is None:
+            raise HTTPException(404, "no such subscriber")
+        if time.time() * 1000 > subscriber["limitAt"]:
+            raise HTTPException(403, "free use is over")
+        transcription = {"model": config.OPENAI_STT_MODEL}
+        if lang:
+            transcription["language"] = lang
+        audio: dict = {"transcription": transcription}
+        if config.OPENAI_STT_MODEL == "gpt-realtime-whisper":
+            audio["turn_detection"] = None  # it streams on its own and rejects a VAD
+        try:
+            response = await stt.post(
+                "/realtime/client_secrets",
+                json={
+                    "expires_after": {"anchor": "created_at", "seconds": 60},
+                    "session": {"type": "transcription", "audio": {"input": audio}},
+                },
+            )
+            response.raise_for_status()
+            return {"value": response.json()["value"]}
+        except (httpx.HTTPError, KeyError, ValueError) as e:
+            logger.warning(
+                "stt token: {}", type(e).__name__
+            )  # never the key or the body
+            raise HTTPException(502, "speech service unavailable")
+
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app
 
@@ -166,4 +220,11 @@ def default_app() -> FastAPI:
     # Without a token the app runs with no bot: the page hides the Telegram block.
     bot = Bot(config.TELEGRAM_BOT_TOKEN) if config.TELEGRAM_BOT_TOKEN else None
     notifier = TelegramNotifier(bot) if bot else Notifier()
-    return create_app(perception, convex, notifier, bot)
+    # Not OPENAI_BASE_URL: the page connects to api.openai.com itself, so the key must
+    # come from there even when vision goes through a compatible endpoint.
+    stt = httpx.AsyncClient(
+        base_url="https://api.openai.com/v1",
+        headers={"Authorization": f"Bearer {config.OPENAI_API_KEYS[0]}"},
+        timeout=10,
+    )
+    return create_app(perception, convex, notifier, bot, stt=stt)

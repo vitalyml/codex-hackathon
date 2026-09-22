@@ -544,55 +544,84 @@ window.addEventListener('pagehide', releaseCamera);
 // new limitAt, and armLimit hides the banner and frees the Watch button.
 pay.addEventListener('click', async () => {
   await client.mutation('subscribers:renew', { token: subscriber });
+  showToast('No charge during the hackathon — 10 more free minutes.');
+});
 
 // ---------- dictation ----------
-// Browser-native speech-to-text for the rule box. No backend, no upload. Where the API is
-// missing (Firefox), the button stays hidden and typing is the only path — no regression.
+// Live speech-to-text for the rule box through OpenAI Realtime. The worker only mints a
+// one-minute key (/subscriber/<token>/stt-token); the microphone goes from this browser to
+// OpenAI over WebRTC and the words come back on the data channel while the user speaks.
 (function setupDictation() {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) return; // unsupported — leave the mic button hidden
-  const recognition = new SR();
-  recognition.lang = navigator.language || 'en-US';
-  recognition.interimResults = true;
-  // Keep listening until the user taps off. Chrome's default (continuous=false) cuts out on
-  // the first pause, which reads as the mic "turning itself off" mid-sentence — not wanted.
-  recognition.continuous = true;
-  let listening = false;
+  if (!window.RTCPeerConnection || !navigator.mediaDevices) return; // leave the mic button hidden
+  const CALLS = 'https://api.openai.com/v1/realtime/calls';
+  const MAX_MS = 60000; // a forgotten microphone is billed by the minute
+  let pc = null, offTimer = null;
   let base = ''; // text already in the box when dictation started — new words append to it
+  let heard = '';
 
   function setListening(on) {
-    listening = on;
     mic.classList.toggle('listening', on);
     mic.setAttribute('aria-pressed', on ? 'true' : 'false');
     mic.title = on ? 'Stop dictation' : 'Dictate rule';
   }
 
-  // continuous=true keeps finalized segments in e.results, so read the whole list, not just
-  // the latest chunk — otherwise earlier words vanish once a new segment finalizes.
-  recognition.addEventListener('result', (e) => {
-    let text = '';
-    for (let i = 0; i < e.results.length; i++) text += e.results[i][0].transcript;
-    rule.value = (base + text).trimStart();
-  });
-  recognition.addEventListener('error', (e) => {
+  // Whatever ends the run — user tap, timeout, network — the button returns to idle. The
+  // words heard so far are already in the box, so nothing is lost.
+  function hangUp() {
+    clearTimeout(offTimer); offTimer = null;
+    if (pc) { pc.getSenders().forEach((s) => s.track && s.track.stop()); pc.close(); pc = null; }
     setListening(false);
-    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') say('Microphone blocked — allow it or type the rule.', true);
-    else if (e.error !== 'aborted' && e.error !== 'no-speech') say(`Dictation error: ${e.error}`, true);
-  });
-  // Whatever ends the run — user tap, silence timeout, network — the button returns to idle.
-  recognition.addEventListener('end', () => setListening(false));
+  }
+
+  function onEvent(e) {
+    let event; try { event = JSON.parse(e.data); } catch (_) { return; }
+    if (event.type === 'conversation.item.input_audio_transcription.delta') heard += event.delta;
+    // models that answer phrase by phrase send no space between the phrases
+    else if (event.type === 'conversation.item.input_audio_transcription.completed') heard += ' ';
+    else if (event.type === 'error') { say(`Dictation error: ${(event.error && event.error.message) || 'unknown'}`, true); hangUp(); return; }
+    else return;
+    rule.value = (base + heard).replace(/\s+/g, ' ').trimStart();
+  }
+
+  async function listen() {
+    const mine = pc = new RTCPeerConnection();
+    const gone = () => pc !== mine; // tapped off, or failed, while this was still connecting
+    setListening(true);
+    base = rule.value ? rule.value.trimEnd() + ' ' : ''; heard = '';
+    offTimer = setTimeout(hangUp, MAX_MS);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (gone()) { stream.getTracks().forEach((t) => t.stop()); return; }
+      mine.addTrack(stream.getTracks()[0], stream);
+      mine.createDataChannel('oai-events').addEventListener('message', onEvent);
+      mine.addEventListener('connectionstatechange', () => {
+        if (!gone() && ['failed', 'disconnected', 'closed'].includes(mine.connectionState)) hangUp();
+      });
+      const lang = (navigator.language || '').slice(0, 2).toLowerCase();
+      const key = await api(`/subscriber/${subscriber}/stt-token${/^[a-z]{2}$/.test(lang) ? '?lang=' + lang : ''}`, { method: 'POST' });
+      if (gone()) return;
+      await mine.setLocalDescription(await mine.createOffer());
+      const res = await fetch(CALLS, {
+        method: 'POST', body: mine.localDescription.sdp,
+        headers: { Authorization: `Bearer ${key.value}`, 'Content-Type': 'application/sdp' },
+      });
+      if (!res.ok) throw new Error(`speech service answered ${res.status}`);
+      const sdp = await res.text();
+      if (gone()) return;
+      await mine.setRemoteDescription({ type: 'answer', sdp });
+    } catch (e) {
+      if (gone()) return;
+      hangUp();
+      if (e.name === 'NotAllowedError') say('Microphone blocked — allow it or type the rule.', true);
+      else if (e.status === 403) say('Free time is over.', true);
+      else say(`Dictation unavailable: ${e.message}`, true);
+    }
+  }
 
   mic.addEventListener('click', () => {
-    if (listening) {
-      // abort() stops immediately; stop() lingers waiting for a final result, which is what
-      // made "off" feel unresponsive. The interim text is already in the box, so nothing lost.
-      setListening(false);
-      recognition.abort();
-      return;
-    }
-    base = rule.value ? rule.value.trimEnd() + ' ' : '';
-    try { recognition.start(); setListening(true); }
-    catch (_) { /* already starting — ignore the double click */ }
+    if (pc) hangUp();
+    else if (!subscriber) say('Dictation is not ready yet — try again in a moment.', true);
+    else listen();
   });
 
   mic.hidden = false;

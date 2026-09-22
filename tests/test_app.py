@@ -1,3 +1,4 @@
+import json
 import time
 
 import httpx
@@ -116,3 +117,30 @@ def test_page_config_qr_and_cross_origin_page(monkeypatch):
     assert ok.headers["access-control-allow-origin"] == site
     other = client.get("/health", headers={"origin": "https://evil.example"})
     assert "access-control-allow-origin" not in other.headers
+
+
+def test_stt_token_goes_only_to_a_subscriber_with_free_time_left():
+    asked = []
+
+    def openai(request: httpx.Request) -> httpx.Response:
+        asked.append(json.loads(request.content)["session"])
+        return httpx.Response(200, json={"value": "ek_short", "expires_at": 1})
+
+    stt = httpx.AsyncClient(
+        transport=httpx.MockTransport(openai), base_url="https://api.openai.com/v1"
+    )
+    convex = FakeConvex()
+    convex.subscribers["fresh"] = {"linked": False, "limitAt": time.time() * 1000 + 1e6}
+    convex.subscribers["spent"] = {"linked": False, "limitAt": 0}
+    quiet = create_app(FakePerception(), convex, Notifier())
+    assert TestClient(quiet).post("/subscriber/fresh/stt-token").status_code == 404
+    client = TestClient(create_app(FakePerception(), convex, Notifier(), stt=stt))
+    assert client.post("/subscriber/nobody/stt-token").status_code == 404
+    assert client.post("/subscriber/spent/stt-token").status_code == 403
+    assert client.post("/subscriber/fresh/stt-token?lang=russian").status_code == 422
+    assert asked == []
+    assert client.post("/subscriber/fresh/stt-token?lang=ru").json() == {
+        "value": "ek_short"
+    }
+    assert asked[0]["type"] == "transcription"
+    assert asked[0]["audio"]["input"]["transcription"]["language"] == "ru"

@@ -11,6 +11,7 @@ FOREVER = 2**62
 class FakeConvex:
     def __init__(self) -> None:
         self.sessions: dict[str, dict] = {}
+        self.subscribers: dict[str, dict] = {}  # token -> subscribers:get view
         self.events: list[dict] = []
         self.photos: list[bytes] = []
         self.usage: list[dict] = []
@@ -39,9 +40,11 @@ class FakeConvex:
         return self.sessions[session_id]
 
     async def query(self, path: str, **args):
-        assert path == "sessions:live", path
         if self.down:
             raise ConvexError("down")
+        if path == "subscribers:get":
+            return copy.deepcopy(self.subscribers.get(args["token"]))
+        assert path == "sessions:live", path
         return copy.deepcopy(self.sessions.get(args["sessionId"]))
 
     async def upload(self, jpeg: bytes) -> str:
