@@ -141,6 +141,7 @@ button:disabled { opacity: .6; cursor: wait; }
 /* Dictation toggle — square icon button, secondary look; pulses red while listening. */
 .mic { flex: none; width: 46px; padding: 0; font-size: 19px; line-height: 1;
        background: var(--panel-2); color: var(--text); border-color: var(--line); }
+.mic.connecting { opacity: .6; cursor: wait; }
 .mic.listening { background: var(--hud-alert); color: #2a1a00; border-color: var(--hud-alert);
                  animation: pulse 1.1s infinite; }
 

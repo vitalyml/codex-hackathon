@@ -522,10 +522,16 @@ window.addEventListener('pagehide', releaseCamera);
   let base = ''; // text already in the box when dictation started — new words append to it
   let heard = '';
 
-  function setListening(on) {
-    mic.classList.toggle('listening', on);
-    mic.setAttribute('aria-pressed', on ? 'true' : 'false');
-    mic.title = on ? 'Stop dictation' : 'Dictate rule';
+  // idle → connecting → listening. WebRTC buffers nothing: words said before the peer
+  // connection is up are gone, so the button pulses only once audio actually flows.
+  function setState(state) {
+    mic.classList.toggle('connecting', state === 'connecting');
+    mic.classList.toggle('listening', state === 'listening');
+    mic.setAttribute('aria-pressed', state === 'idle' ? 'false' : 'true');
+    mic.title = state === 'idle' ? 'Dictate rule' : 'Stop dictation';
+    if (state === 'connecting') say('Connecting the microphone…');
+    else if (state === 'listening') say('Speak now.');
+    else if (/^(Connecting the microphone…|Speak now\.)$/.test(status.textContent)) say('');
   }
 
   // Whatever ends the run — user tap, timeout, network — the button returns to idle. The
@@ -533,7 +539,7 @@ window.addEventListener('pagehide', releaseCamera);
   function hangUp() {
     clearTimeout(offTimer); offTimer = null;
     if (pc) { pc.getSenders().forEach((s) => s.track && s.track.stop()); pc.close(); pc = null; }
-    setListening(false);
+    setState('idle');
   }
 
   function onEvent(e) {
@@ -549,20 +555,27 @@ window.addEventListener('pagehide', releaseCamera);
   async function listen() {
     const mine = pc = new RTCPeerConnection();
     const gone = () => pc !== mine; // tapped off, or failed, while this was still connecting
-    setListening(true);
+    let streamP = null; // the mic may be granted while the key is still failing
+    setState('connecting');
     base = rule.value ? rule.value.trimEnd() + ' ' : ''; heard = '';
     offTimer = setTimeout(hangUp, MAX_MS);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // The mic prompt and the key (browser → worker → Convex → OpenAI) are the slow part;
+      // they do not need each other.
+      const lang = (navigator.language || '').slice(0, 2).toLowerCase();
+      streamP = navigator.mediaDevices.getUserMedia({ audio: true });
+      const [stream, key] = await Promise.all([
+        streamP,
+        api(`/subscriber/${subscriber}/stt-token${/^[a-z]{2}$/.test(lang) ? '?lang=' + lang : ''}`, { method: 'POST' }),
+      ]);
       if (gone()) { stream.getTracks().forEach((t) => t.stop()); return; }
       mine.addTrack(stream.getTracks()[0], stream);
       mine.createDataChannel('oai-events').addEventListener('message', onEvent);
       mine.addEventListener('connectionstatechange', () => {
-        if (!gone() && ['failed', 'disconnected', 'closed'].includes(mine.connectionState)) hangUp();
+        if (gone()) return;
+        if (mine.connectionState === 'connected') setState('listening');
+        else if (['failed', 'disconnected', 'closed'].includes(mine.connectionState)) hangUp();
       });
-      const lang = (navigator.language || '').slice(0, 2).toLowerCase();
-      const key = await api(`/subscriber/${subscriber}/stt-token${/^[a-z]{2}$/.test(lang) ? '?lang=' + lang : ''}`, { method: 'POST' });
-      if (gone()) return;
       await mine.setLocalDescription(await mine.createOffer());
       const res = await fetch(CALLS, {
         method: 'POST', body: mine.localDescription.sdp,
@@ -573,6 +586,7 @@ window.addEventListener('pagehide', releaseCamera);
       if (gone()) return;
       await mine.setRemoteDescription({ type: 'answer', sdp });
     } catch (e) {
+      if (streamP) streamP.then((st) => st.getTracks().forEach((t) => t.stop()), () => {});
       if (gone()) return;
       hangUp();
       if (e.name === 'NotAllowedError') say('Microphone blocked — allow it or type the rule.', true);
