@@ -13,6 +13,25 @@ Grok's vision API does the looking; Render hosts it; the phone just has to have 
 
 > Built at the Grok Bot Serbia Hackathon, Belgrade, 12 September 2026.
 
+---
+
+**Contents**
+
+- [How it works](#how-it-works)
+- [What it feels like](#what-it-feels-like)
+- [See it](#see-it)
+- [Why it's different](#why-its-different)
+- [Use it for](#use-it-for)
+- [Preprocessing: why a static room costs nothing](#preprocessing-why-a-static-room-costs-nothing)
+- [Privacy: no photos stored, text encrypted](#privacy-no-photos-stored-text-encrypted)
+- [Run it yourself](#run-it-yourself)
+- [Under the hood](#under-the-hood)
+- [What it costs](#what-it-costs)
+
+---
+
+## How it works
+
 ![Watcher architecture: camera frames enter the server, the gate drops static scenes, only changed frames go to Grok, the tracker fires once per event and Telegram delivers the proof photo](docs/images/architecture.png)
 
 Many frames in, few model calls, one alert per event. The gate in the middle is where most
@@ -295,10 +314,3 @@ Max is the ceiling: the scene changes every frame and the gate lets everything t
 Avg is a measured session: a room where something happened now and then, the gate
 dropped four frames out of five. Cost is linear in the interval, so doubling the slider
 halves the bill. A tab in the background sends nothing.
-
-## Notebooks
-
-The gate and the perception prompt were shaped in `notebooks/`. To run them in VS Code:
-`poetry install`, install the Python and Jupyter extensions, open an `.ipynb`, and pick
-`.venv/bin/python` as the kernel. `make notebook` starts Jupyter Lab on `:8889` for the
-`jupyter` MCP.
